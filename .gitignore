@@ -105,3 +105,16 @@ scripts/backup*/
 Thumbs.db
 .idea/
 .vscode/
+
+# =========================
+# Test outputs
+# =========================
+
+test-results/
+*.smoke.json
+
+# =========================
+# Local manual backups
+# =========================
+
+.local_backups/
