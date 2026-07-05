@@ -39,6 +39,7 @@ STATUS_JOBS_SCRIPT = SCRIPT_DIR / "status_jobs.py"
 RETRY_FAILED_JOB_SCRIPT = SCRIPT_DIR / "retry_failed_job.py"
 REPAIR_GOLD_FROM_JSON_SCRIPT = SCRIPT_DIR / "repair_gold_from_json.py"
 CHECK_STORAGE_INTEGRITY_SCRIPT = SCRIPT_DIR / "check_storage_integrity.py"
+RECOVER_ORPHANED_PROCESSING_SCRIPT = SCRIPT_DIR / "recover_orphaned_processing.py"
 INIT_DIRS_SCRIPT = SCRIPT_DIR / "init_dirs.py"
 
 IMPORTANT_SCRIPTS = [
@@ -50,6 +51,7 @@ IMPORTANT_SCRIPTS = [
     SCRIPT_DIR / "retry_failed_job.py",
     SCRIPT_DIR / "repair_gold_from_json.py",
     SCRIPT_DIR / "check_storage_integrity.py",
+    SCRIPT_DIR / "recover_orphaned_processing.py",
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
 ]
@@ -565,6 +567,89 @@ def check_storage_integrity_summary(
     )
 
 
+def check_orphaned_processing_summary(
+    results: list[CheckResult],
+    verbose: bool = False,
+) -> None:
+    try:
+        from recover_orphaned_processing import (
+            collect_reports,
+            status_counts,
+            summarize_reports,
+        )
+    except Exception as exc:
+        add_result(
+            results,
+            "error",
+            "orphaned_processing:import",
+            "Не удалось импортировать recover_orphaned_processing.py.",
+            details=str(exc),
+        )
+        return
+
+    try:
+        reports = collect_reports(
+            orphan_hours=6.0,
+            include_recent=False,
+            job_id_filter=None,
+        )
+
+        report_summary = summarize_reports(reports)
+        counts = status_counts(reports)
+
+    except Exception as exc:
+        add_result(
+            results,
+            "error",
+            "orphaned_processing:run",
+            "Не удалось выполнить проверку зависших processing job.",
+            details=str(exc),
+        )
+        return
+
+    counts_text = " ".join(
+        f"{key}={value}"
+        for key, value in counts.items()
+    ) or "-"
+
+    details = (
+        f"reports: ok={report_summary['ok']} "
+        f"warn={report_summary['warn']} "
+        f"error={report_summary['error']} "
+        f"total={report_summary['total']}; "
+        f"status_counts: {counts_text}; "
+        "details: python scripts\\recover_orphaned_processing.py"
+    )
+
+    if report_summary["error"] > 0:
+        add_result(
+            results,
+            "error",
+            "orphaned_processing",
+            "Найдены processing job без понятного источника восстановления.",
+            details=details,
+        )
+        return
+
+    if report_summary["warn"] > 0:
+        add_result(
+            results,
+            "warn",
+            "orphaned_processing",
+            "Найдены зависшие или требующие внимания processing job.",
+            details=details,
+        )
+        return
+
+    add_result(
+        results,
+        "ok",
+        "orphaned_processing",
+        "Зависшие processing job не найдены.",
+        details=details if verbose else None,
+    )
+
+
 def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
     load_dotenv_if_exists()
 
@@ -677,6 +762,11 @@ def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
         check_py_compile(results, script_path)
 
     check_storage_integrity_summary(
+        results=results,
+        verbose=verbose,
+    )
+
+    check_orphaned_processing_summary(
         results=results,
         verbose=verbose,
     )
@@ -944,7 +1034,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Диагностика окружения и структуры проекта: папки, доступ на запись, "
             "config, .env, ffmpeg, whisperx, HF token при включённой diarization, "
-            "синтаксис основных Python-скриптов и краткая storage integrity summary."
+            "синтаксис основных Python-скриптов, краткая storage integrity summary "
+            "и orphaned processing summary."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
