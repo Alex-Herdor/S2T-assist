@@ -26,6 +26,7 @@ SCRIPTS_TO_COMPILE = [
     SCRIPT_DIR / "repair_gold_from_json.py",
     CHECK_STORAGE_INTEGRITY_SCRIPT,
     SCRIPT_DIR / "recover_orphaned_processing.py",
+    SCRIPT_DIR / "cleanup_old_jobs.py",
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
 ]
