@@ -1,76 +1,163 @@
 # Pipeline Details
 
-Подробное описание устройства локального пайплайна обработки встреч через WhisperX.
-
 Основной README находится в корне проекта: [`../README.md`](../README.md).
 
+Этот документ описывает внутреннюю структуру локального WhisperX meeting pipeline: зоны хранения, жизненный цикл job, recovery-модель, gold contract и текущую архитектуру CLI.
+
 ---
 
-## Общая идея
+## Главный принцип
 
-Проект строит файловую обвязку вокруг WhisperX.
+Проект строится вокруг локального файлового пайплайна.
 
-Основной путь данных:
+Сейчас не используются:
 
-```text
-landing
-→ bronze
-→ processing
-→ silver
-→ gold
+* Airflow;
+* web UI;
+* SFTP upload;
+* MinIO/S3;
+* облачная обработка;
+* jobs.db.
+
+Сначала стабилизируется локальный MVP, затем поверх него можно добавлять оркестрацию, UI и автоматизацию.
+
+---
+
+## Текущий пользовательский слой
+
+Основной пользовательский вход:
+
+```bat
+python scripts\pipeline.py <command>
 ```
 
-Путь восстановления после ошибок:
+Команды:
+
+```bat
+python scripts\pipeline.py process
+python scripts\pipeline.py status
+python scripts\pipeline.py repair --job-id <failed_job_id>
+python scripts\pipeline.py doctor
+python scripts\pipeline.py init
+```
+
+`pipeline.py` — это façade над существующими скриптами. Он нужен, чтобы обычная эксплуатация не требовала помнить множество отдельных команд.
+
+---
+
+## Разделение слоёв
 
 ```text
-failed
-→ retry from bronze
-→ repair from silver
-→ status audit
+Пользовательский / операционный слой:
+  scripts/pipeline.py
+
+Диагностический слой:
+  pipeline.py doctor
+  scripts/status_jobs.py
+
+Dev / CI слой:
+  tests/smoke_tests.py
+
+Локальный safety слой:
+  tools/backup_scripts.py
+
+Инженерный слой:
+  process_one_file.py
+  process_landing_once.py
+  retry_failed_job.py
+  repair_gold_from_json.py
+  run_whisperx.py
+  format_whisperx_json.py
+
+Будущий слой:
+  jobs.db
+  API/UI
+  Airflow
 ```
 
 ---
 
-## Зоны хранения
+## Что вызывает `pipeline.py`
 
-| Зона                       | Назначение                                                                  |
-| -------------------------- | --------------------------------------------------------------------------- |
-| `data/landing`             | Входная зона. Сюда вручную кладутся аудио/видео файлы.                      |
-| `data/bronze/raw_original` | Системное хранилище принятых исходников. Источник истины для полного retry. |
-| `data/processing/<job_id>` | Временная рабочая папка конкретной обработки.                               |
-| `data/silver/audio_flac`   | Долгосрочный lossless-аудиоархив.                                           |
-| `data/silver/asr_json`     | Технический raw WhisperX JSON. Источник для быстрого repair.                |
-| `data/gold/transcripts`    | Готовые результаты для пользователя или следующей LLM-обработки.            |
-| `data/failed`              | Диагностические слепки упавших jobs.                                        |
-| `data/archive`             | Зарезервировано под будущие сценарии архивирования.                         |
+| Команда   | Назначение                               | Что используется под капотом                       |
+| --------- | ---------------------------------------- | -------------------------------------------------- |
+| `process` | Обработка landing batch или одного файла | `process_landing_once.py` / `process_one_file.py`  |
+| `status`  | Read-only статус хранилища               | `status_jobs.py`                                   |
+| `repair`  | Умное восстановление failed job          | `repair_gold_from_json.py` / `retry_failed_job.py` |
+| `doctor`  | Диагностика окружения и структуры        | встроенные проверки `pipeline.py`                  |
+| `init`    | Создание локальных папок                 | `init_dirs.py`                                     |
 
 ---
 
-## Почему есть `landing` и `bronze`
-
-`landing → bronze` — это архитектурная граница.
-
-`landing` считается внешней и потенциально грязной зоной. Там могут быть:
-
-* недокопированные файлы;
-* временные `.uploading`;
-* `.part`;
-* `.tmp`;
-* ошибки загрузки;
-* будущие `.done` markers.
-
-`bronze/raw_original` — системная зона. Туда пишет только пайплайн после приёмки файла.
-
-Для ручного MVP это немного избыточно, но полезно для будущего развития: SFTP, веб-загрузка, Airflow или watcher смогут писать во входную зону, не трогая системное raw-хранилище.
-
----
-
-## Success path
-
-Успешная обработка:
+## Зоны данных
 
 ```text
 data/landing
+  Входная зона.
+  Сюда вручную кладутся аудио/видео файлы.
+  В будущем сюда может писать upload/UI/SFTP.
+
+data/bronze/raw_original
+  Системное хранилище принятых исходников.
+  Сюда пишет только pipeline после приёмки файла.
+
+data/processing
+  Временная рабочая зона конкретного job_id.
+  Здесь создаётся рабочий WAV и job_context.json.
+
+data/silver/audio_flac
+  Долгосрочный lossless-аудиоархив.
+
+data/silver/asr_json
+  Технический raw WhisperX JSON.
+
+data/gold/transcripts
+  Готовый gold-result для дальнейшей обработки.
+
+data/failed
+  Diagnostic snapshot для упавших job.
+
+data/archive
+  Резерв под будущие сценарии архивации.
+
+hf_cache
+  Локальный Hugging Face cache.
+```
+
+---
+
+## Почему есть `landing → bronze`
+
+`landing` — внешняя входная зона.
+
+Там может быть грязь:
+
+* недогруженный файл;
+* временный файл;
+* `.uploading`;
+* `.part`;
+* `.tmp`;
+* случайный мусор;
+* будущие upload markers.
+
+`bronze/raw_original` — системная зона принятых исходников.
+
+Архитектурный смысл:
+
+```text
+внешний мир пишет только в landing
+pipeline принимает файл и переносит его в bronze
+дальше source of truth — bronze
+```
+
+Для MVP это немного избыточно, но важно для будущего UI/SFTP/Airflow.
+
+---
+
+## Успешный путь обработки
+
+```text
+data/landing/<original_file>
 → data/bronze/raw_original/<job_id>.<ext>
 → data/processing/<job_id>/<original_stem>__work.wav
 → data/silver/audio_flac/<job_id>.flac
@@ -82,11 +169,15 @@ data/landing
    └── job_context.json
 ```
 
+После успешной обработки `data/processing/<job_id>` удаляется, если не указан режим `--keep-processing`.
+
 ---
 
 ## Gold contract
 
-Итоговая gold-папка:
+Gold-result сейчас хранит не человекочитаемые TXT/MD, а технический результат, готовый для следующего слоя обработки.
+
+Структура:
 
 ```text
 data/gold/transcripts/<result_dir>/
@@ -97,273 +188,538 @@ data/gold/transcripts/<result_dir>/
 
 ### `whisperx_raw.json`
 
-Копия raw WhisperX JSON.
+Raw WhisperX JSON.
 
-Сохраняет `segments` и `words` / word-level тайминги. Это основной вход для следующей LLM-обработки.
+Обычно содержит:
+
+* `segments`;
+* `words`;
+* timestamps;
+* speaker labels, если была diarization.
+
+Этот файл является основным входом для будущей LLM-постобработки.
 
 ### `manifest.json`
 
-Краткий manifest успешного результата:
+Краткий success manifest.
+
+Содержит:
 
 * `job_id`;
-* `status`;
-* `source_mode`;
-* `attempt_type`;
-* `retry_of_job_id`;
-* пути к основным артефактам;
-* информация о raw JSON.
+* статус;
+* дату создания;
+* исходное имя файла;
+* пути к ключевым результатам.
 
 ### `job_context.json`
 
-Полный контекст job:
+Полный контекст job.
 
-* исходное имя файла;
-* текущий статус;
-* текущий/последний шаг;
-* тип запуска;
-* пути к артефактам;
-* error message / traceback при падении;
-* timestamps.
+Содержит:
 
----
-
-## Source mode и attempt type
-
-В `job_context.json` и `manifest.json` используются поля:
-
-| Поле              | Пример               | Значение                            |
-| ----------------- | -------------------- | ----------------------------------- |
-| `source_mode`     | `landing`            | Обычная обработка из landing.       |
-| `source_mode`     | `bronze`             | Retry от уже принятого исходника.   |
-| `source_mode`     | `silver_asr_json`    | Repair из готового WhisperX JSON.   |
-| `attempt_type`    | `initial`            | Первичная обработка.                |
-| `attempt_type`    | `retry`              | Повторная обработка от bronze.      |
-| `attempt_type`    | `repair_from_silver` | Восстановление gold из silver JSON. |
-| `retry_of_job_id` | `<old_job_id>`       | Ссылка на старый failed job.        |
+* `job_id`;
+* `status`;
+* `current_step`;
+* `failed_step`;
+* `error_message`;
+* `error_traceback`;
+* `original_filename`;
+* `source_mode`;
+* `attempt_type`;
+* `retry_of_job_id`;
+* timestamps;
+* paths.
 
 ---
 
-## Failed lifecycle
+## Почему TXT/MD не основной результат
 
-Failed job может иметь один из lifecycle-статусов.
+`format_whisperx_json.py` оставлен как вспомогательный ручной форматтер.
 
-| Статус                          | Значение                                                                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| `failed_active`                 | Job упала и ещё не была успешно восстановлена.                                             |
-| `retried_successfully_inferred` | Успешный retry/repair найден по `gold/job_context.json`, но marker в failed ещё не создан. |
-| `retried_successfully_marked`   | В failed-папке есть `RETRIED_SUCCESSFULLY.json`.                                           |
-
-Marker находится здесь:
+Основной результат сейчас — raw JSON, потому что дальше предполагается LLM-слой:
 
 ```text
-data/failed/<old_job_id>/RETRIED_SUCCESSFULLY.json
+WhisperX raw JSON
+→ нормализация/чанкинг
+→ LLM-summary
+→ decisions/action items/minutes
 ```
 
-Пример marker:
+TXT/MD можно генерировать позже как отдельный presentation layer.
 
-```json
-{
-  "status": "retried_successfully",
-  "old_job_id": "20260705_120000_meeting_abcd1234",
-  "retry_source": "bronze",
-  "marked_at": "2026-07-05T15:30:00",
-  "latest_retry": {
-    "new_job_id": "20260705_153000_meeting_efgh5678",
-    "attempt_type": "retry",
-    "source_mode": "bronze",
-    "retry_of_job_id": "20260705_120000_meeting_abcd1234",
-    "gold_result_dir": "<PROJECT_ROOT>\\data\\gold\\transcripts\\meeting__20260705_153000__efgh5678"
-  },
-  "all_successful_retries": [],
-  "notes": "Старый failed не удалён автоматически. Он сохранён как диагностический слепок исходной ошибки."
-}
+---
+
+## Основные статусы и шаги
+
+Текущий успешный lifecycle:
+
+```text
+LANDING_READY
+→ BRONZE_ACCEPTED
+→ PROCESSING_CREATED
+→ WORK_WAV_CREATED
+→ ARCHIVE_FLAC_CREATED
+→ WHISPERX_RUNNING
+→ ASR_JSON_CREATED
+→ GOLD_READY
+→ SUCCESS
+```
+
+В `job_context.json` текущие шаги могут быть такими:
+
+```text
+move_to_bronze
+use_existing_bronze
+create_work_wav
+create_archive_flac
+run_whisperx
+save_silver_asr_json
+save_gold_raw_json
+gold_ready
 ```
 
 ---
 
-## Retry от bronze
+## `source_mode`
 
-Полный retry используется, если WhisperX не дошёл до создания JSON.
+`source_mode` показывает, откуда был запущен job.
 
-Команда:
+Примеры:
+
+```text
+landing
+bronze
+silver_asr_json
+```
+
+---
+
+## `attempt_type`
+
+`attempt_type` показывает тип попытки.
+
+Примеры:
+
+```text
+initial
+retry_from_bronze
+repair_from_silver
+```
+
+---
+
+## Recovery-модель
+
+Есть несколько сценариев восстановления.
+
+### A. Повтор из landing
+
+Если файл ещё не был принят в bronze.
+
+Используется обычный запуск:
+
+```bat
+python scripts\pipeline.py process
+```
+
+---
+
+### B. Полный retry от bronze
+
+Если WhisperX упал или gold не был создан, но исходник уже есть в bronze:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id> --mode bronze
+```
+
+Под капотом:
 
 ```bat
 python scripts\retry_failed_job.py --job-id <failed_job_id>
 ```
 
-Логика:
-
-```text
-failed/<old_job_id>/processing/job_context.json
-→ bronze/raw_original/<old_job_id>.<ext>
-→ process_one_file.py --from-bronze
-→ новый successful gold
-→ failed/<old_job_id>/RETRIED_SUCCESSFULLY.json
-```
-
-`retry_source`:
-
-```json
-"bronze"
-```
-
-Старый failed не удаляется автоматически. Он остаётся диагностическим слепком исходной ошибки.
+Создаётся новый job, связанный с исходным через `retry_of_job_id`.
 
 ---
 
-## Repair из silver JSON
+### C. Быстрый repair из silver JSON
 
-Быстрый repair используется, если WhisperX уже создал JSON, но `gold` отсутствует или некорректен.
+Если WhisperX уже успешно создал `silver/asr_json/<job_id>.json`, но gold-result не был создан или был повреждён:
 
-Команда:
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id> --mode silver
+```
+
+Под капотом:
 
 ```bat
 python scripts\repair_gold_from_json.py --job-id <failed_job_id>
 ```
 
+Повторный WhisperX не запускается.
+
+---
+
+### D. Auto repair
+
+Основной пользовательский вариант:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id>
+```
+
 Логика:
 
 ```text
-silver/asr_json/<job_id>.json
-→ gold/transcripts/<result_dir>/whisperx_raw.json
-→ gold/transcripts/<result_dir>/manifest.json
-→ gold/transcripts/<result_dir>/job_context.json
-→ failed/<old_job_id>/RETRIED_SUCCESSFULLY.json
-```
+если есть silver/asr_json:
+  repair из silver
 
-`retry_source`:
+иначе если есть bronze/raw_original:
+  полный retry от bronze
 
-```json
-"silver_asr_json"
-```
-
-Это экономный сценарий: WhisperX не запускается повторно.
-
----
-
-## Как выбрать способ восстановления
-
-| Ситуация                                                        | Что делать                                                                 |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| WhisperX упал до создания JSON                                  | `retry_failed_job.py --job-id <failed_job_id>`                             |
-| `silver/asr_json/<job_id>.json` уже есть, но `gold` отсутствует | `repair_gold_from_json.py --job-id <failed_job_id>`                        |
-| `gold` есть, но старый failed не отмечен                        | проверить `status_jobs.py --failed-only`                                   |
-| Осталась папка `processing` после success                       | проверить `CLEANUP_FAILED.txt`; это cleanup warning, не обязательно failed |
-| В `landing` несколько файлов                                    | `process_landing_once.py`                                                  |
-| Нужно понять состояние системы                                  | `status_jobs.py`                                                           |
-
----
-
-## Что происходит при ошибке
-
-Если `process_one_file.py` падает, он переносит рабочую папку в:
-
-```text
-data/failed/<job_id>/processing
-```
-
-Обычно там есть:
-
-```text
-data/failed/<job_id>/
-├── ERROR.txt
-└── processing
-    ├── job_context.json
-    ├── logs
-    │   └── process.log
-    └── ...
-```
-
-`failed/processing` — диагностический слепок, а не источник истины для retry.
-
-Источник истины для полного retry:
-
-```text
-data/bronze/raw_original
-```
-
-Источник истины для быстрого repair:
-
-```text
-data/silver/asr_json
+иначе:
+  ошибка — источник восстановления не найден
 ```
 
 ---
 
-## Cleanup behavior
+## Failed lifecycle
 
-После успешной обработки `processing/<job_id>` обычно удаляется.
-
-Если удалить не удалось, job не считается failed, потому что результат уже создан в `gold`.
-
-В этом случае остаётся:
+Failed job попадает в:
 
 ```text
-data/processing/<job_id>/CLEANUP_FAILED.txt
+data/failed/<job_id>
 ```
 
-`status_jobs.py` покажет это как cleanup warning.
+Там может быть:
+
+```text
+processing/job_context.json
+error logs
+частичные временные файлы
+```
+
+После успешного retry/repair старый failed job не удаляется автоматически.
+
+Вместо этого создаётся marker:
+
+```text
+RETRIED_SUCCESSFULLY.json
+```
+
+Это позволяет сохранить историю инцидента и при этом понимать, что проблема уже закрыта.
 
 ---
 
-## Проверка состояния
+## `status_jobs.py`
 
-Основная команда:
+`status_jobs.py` — read-only аудит файловой структуры.
+
+Через façade:
+
+```bat
+python scripts\pipeline.py status
+```
+
+Напрямую:
 
 ```bat
 python scripts\status_jobs.py
 ```
 
-Полезные варианты:
+Поддерживаемые режимы:
 
 ```bat
-python scripts\status_jobs.py --failed-only
-python scripts\status_jobs.py --processing-only
-python scripts\status_jobs.py --gold-only
-python scripts\status_jobs.py --landing-only
-python scripts\status_jobs.py --sizes
-python scripts\status_jobs.py --json
+python scripts\pipeline.py status --landing
+python scripts\pipeline.py status --processing
+python scripts\pipeline.py status --failed
+python scripts\pipeline.py status --gold
+python scripts\pipeline.py status --json
+python scripts\pipeline.py status --sizes
 ```
+
+`status_jobs.py` не должен изменять файлы.
+
+Служебные файлы `.gitkeep` и `.gitignore` в landing не показываются.
+
+---
+
+## `doctor`
+
+`doctor` проверяет готовность локальной установки:
+
+```bat
+python scripts\pipeline.py doctor
+```
+
+Проверяет:
+
+* наличие основных папок;
+* доступ на запись;
+* наличие `config/whisperx_config.json`;
+* наличие `.env`, если он нужен;
+* корректность JSON-конфига;
+* `hf_cache_dir`;
+* наличие HF token, если включена diarization;
+* доступность `ffmpeg`;
+* доступность `whisperx`;
+* `py_compile` основных Python-скриптов.
+
+Подробный режим:
+
+```bat
+python scripts\pipeline.py doctor --verbose
+```
+
+JSON-режим:
+
+```bat
+python scripts\pipeline.py doctor --json
+```
+
+`doctor` — эксплуатационная диагностика, поэтому он находится в `pipeline.py`.
+
+---
+
+## Smoke tests
+
+Smoke tests — это dev/CI-инструмент, а не часть пользовательского pipeline flow.
+
+Запуск:
+
+```bat
+python tests\smoke_tests.py
+```
+
+В CI или окружении без WhisperX/ffmpeg:
+
+```bat
+python tests\smoke_tests.py --skip-doctor
+```
+
+Проверяет:
+
+* синтаксис основных скриптов;
+* help-команды `pipeline.py`;
+* `pipeline.py init`;
+* `pipeline.py status --json`;
+* `pipeline.py process --dry-run --show-sizes`;
+* опционально `pipeline.py doctor`.
+
+Smoke tests не запускают реальную транскрибацию.
+
+---
+
+## Локальный backup перед правками
+
+Для быстрой страховки перед ручными изменениями используется:
+
+```bat
+python tools\backup_scripts.py --include-docs --label before_next_edit
+```
+
+По умолчанию сохраняются:
+
+```text
+scripts/*.py
+tests/*.py
+```
+
+С `--include-docs` дополнительно сохраняются:
+
+```text
+README.md
+docs/*.md
+config/*.example.json
+.env.example
+.gitignore
+environment.yml
+```
+
+Backup складывается в:
+
+```text
+.local_backups/scripts_<YYYYMMDD_HHMMSS>[_label]
+```
+
+`.local_backups` не попадает в Git.
 
 ---
 
 ## Файловая готовность
 
-В текущем ручном MVP `.done` marker не требуется.
+Сейчас MVP запускается вручную и может обрабатывать конкретный файл или landing batch.
 
-`process_landing_once.py` обрабатывает готовые файлы из `data/landing` и игнорирует временные расширения:
+В будущем для upload можно использовать один из подходов:
 
 ```text
-.done
-.uploading
-.part
-.tmp
-.crdownload
+file.uploading → rename to final filename
 ```
 
-В будущем для загрузки можно использовать схему:
+или:
 
 ```text
-file.uploading
-→ rename to file.m4a
-→ optional file.done
+file.m4a + file.m4a.done
+```
+
+Пока это не реализовано как обязательный механизм.
+
+---
+
+## Cleanup behavior
+
+После успешной обработки processing-папка удаляется.
+
+Если удалить не удалось:
+
+* job не считается failed;
+* создаётся warning;
+* может остаться `CLEANUP_FAILED.txt`.
+
+Это не должно ломать результат обработки.
+
+---
+
+## Будущая проверка целостности
+
+Следующий планируемый инструмент:
+
+```bat
+python scripts\check_storage_integrity.py
+python scripts\check_storage_integrity.py --json
+python scripts\check_storage_integrity.py --verbose
+```
+
+Он должен проверять системные нарушения файлового контракта:
+
+```text
+gold есть, но нет whisperx_raw.json
+gold есть, но нет manifest.json
+gold есть, но нет job_context.json
+failed есть, но нет job_context.json
+failed помечен retried, но retry-result не найден
+silver/asr_json есть, но нет gold
+processing висит слишком долго
+CLEANUP_FAILED.txt есть
+bronze есть, но нет связанного job_context/failed/gold
+```
+
+Сначала это будет отдельный инженерный скрипт.
+
+Потом краткая сводка может быть добавлена в:
+
+```bat
+python scripts\pipeline.py doctor
 ```
 
 ---
 
-## Будущее развитие
+## Будущий `jobs.db`
 
-Возможные следующие шаги:
+`jobs.db` не должен заменять файловую структуру.
 
-* `cleanup_old_jobs.py` с `--dry-run`;
-* `recover_orphaned_processing.py`;
-* `jobs.db` для продуктового статуса;
-* Airflow DAG поверх `process_one_file.py`;
-* веб-интерфейс загрузки/скачивания;
-* SFTP/upload;
-* speaker remapping;
-* генерация user-friendly TXT/MD отдельным этапом;
-* VTT/WebVTT;
-* веб-плеер.
+Принцип:
 
-Airflow должен быть оркестратором, а не хранилищем больших файлов. В XCom следует передавать только `job_id`, пути и статусы.
+```text
+source of truth:
+  файлы + job_context.json + manifest.json
+
+jobs.db:
+  быстрый индекс для UI
+```
+
+Возможные поля:
+
+```text
+job_id
+original_filename
+status
+current_step
+source_mode
+attempt_type
+retry_of_job_id
+bronze_path
+silver_json_path
+gold_result_dir
+created_at
+updated_at
+error_message
+```
+
+Если база сломается, её можно будет восстановить из файлов.
+
+---
+
+## Будущий UI
+
+UI должен появиться после стабилизации файлового слоя и появления `jobs.db`.
+
+Минимальные функции UI:
+
+```text
+загрузка файла
+список jobs
+статус job
+детали job
+retry/repair
+скачивание результата
+запуск диагностики
+```
+
+UI не должен напрямую реализовывать бизнес-логику обработки. Он должен вызывать уже проверенный backend/CLI/API слой.
+
+---
+
+## Будущий Airflow
+
+Airflow нужен позже как оркестратор, а не как хранилище.
+
+Первый DAG должен быть тонким:
+
+```text
+scan landing
+→ call process_one_file.py / pipeline process
+→ report status
+```
+
+Airflow не должен хранить большие файлы в XCom.
+
+Передавать можно только:
+
+```text
+job_id
+пути
+статусы
+короткие ошибки
+```
+
+---
+
+## Что не усложнять сейчас
+
+Пока не добавлять без отдельного решения:
+
+* Airflow;
+* web UI;
+* MinIO/S3;
+* VPS;
+* Cloudflare Tunnel;
+* SFTP;
+* VTT;
+* веб-плеер;
+* сложный speaker remapping;
+* оптимизацию diarization;
+* cloud processing.
+
+---
+
+## Принцип дальнейшего развития
+
+```text
+Обычная эксплуатация не должна требовать много команд.
+Новые инструменты могут появляться, но не как обязательные ручные шаги.
+Инженерные скрипты должны быть доступны напрямую.
+Пользовательский слой должен оставаться простым.
+Будущий UI/API должен использовать те же контракты, что CLI.
+Сначала устойчивость и наблюдаемость, потом jobs.db/UI/Airflow.
+```

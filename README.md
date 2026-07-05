@@ -1,174 +1,373 @@
 # Local WhisperX Meeting Pipeline
 
-Локальный файловый пайплайн для обработки аудио/видео записей встреч через WhisperX.
+Локальный пайплайн для обработки аудио/видео записей рабочих встреч через WhisperX на Windows 11.
 
-Проект не заменяет WhisperX, а добавляет вокруг него практичную локальную обвязку:
+Цель проекта — принимать записи встреч, локально обрабатывать их через WhisperX, сохранять технический JSON и готовить данные для дальнейшей постобработки, UI и автоматизации.
 
-* приём файлов в `data/landing`;
-* сохранение оригиналов в `bronze`;
-* подготовка рабочего WAV;
-* сохранение архивного FLAC;
-* запуск WhisperX;
-* сохранение raw JSON;
-* публикация результата в `gold`;
-* retry / repair после ошибок;
-* проверка состояния локального хранилища.
-
-Текущий статус: **локальный MVP без Airflow, веб-интерфейса, SFTP и облачной обработки**.
+Проект рассчитан на локальный запуск на mini-PC без облачной обработки.
 
 Подробности по устройству пайплайна: [`docs/PIPELINE_DETAILS.md`](docs/PIPELINE_DETAILS.md).
 
 ---
 
-## Возможности MVP
+## Текущее состояние MVP
 
-* обработка одного файла;
-* пакетная обработка файлов из `data/landing`;
-* сохранение исходников в `data/bronze/raw_original`;
-* сохранение FLAC-архива в `data/silver/audio_flac`;
-* сохранение raw WhisperX JSON в `data/silver/asr_json`;
-* публикация результата в `data/gold/transcripts`;
-* read-only аудит состояния jobs;
-* полный retry failed job от `bronze`;
-* быстрый repair `gold` из готового `silver/asr_json`;
-* защита от случайного коммита данных, токенов и кешей моделей.
+Сейчас реализован локальный файловый пайплайн:
+
+1. файл вручную кладётся в `data/landing`;
+2. запускается единая CLI-команда;
+3. файл переносится в `data/bronze/raw_original`;
+4. создаётся рабочий WAV в `data/processing`;
+5. создаётся FLAC-архив в `data/silver/audio_flac`;
+6. запускается WhisperX;
+7. raw WhisperX JSON сохраняется в `data/silver/asr_json`;
+8. итоговый gold-result сохраняется в `data/gold/transcripts`;
+9. временная processing-папка удаляется после успешной обработки;
+10. при ошибке создаётся diagnostic snapshot в `data/failed`.
 
 ---
 
-## Не входит в MVP
+## Что входит в MVP
 
-В текущей версии намеренно нет:
+* локальная обработка аудио/видео файлов;
+* единая пользовательская точка входа `scripts/pipeline.py`;
+* ручная batch-обработка файлов из `data/landing`;
+* обработка одного конкретного файла;
+* сохранение исходника в `bronze`;
+* создание рабочего WAV;
+* создание архивного FLAC;
+* запуск WhisperX;
+* сохранение raw WhisperX JSON;
+* сохранение gold-result с `whisperx_raw.json`, `manifest.json`, `job_context.json`;
+* retry failed job от bronze;
+* repair gold из уже готового silver JSON;
+* диагностика окружения через `pipeline.py doctor`;
+* read-only статус локального хранилища;
+* smoke tests для разработки;
+* локальный backup скриптов перед ручными правками.
+
+---
+
+## Что пока не входит в MVP
 
 * Airflow;
-* веб-интерфейса;
-* SFTP / upload;
-* watcher / service mode;
-* MinIO / S3;
-* облачной обработки;
-* VTT / WebVTT;
-* веб-плеера;
-* сложного speaker remapping;
-* оптимизации скорости диаризации.
+* веб-интерфейс;
+* сетевой upload;
+* SFTP-интеграция;
+* MinIO/S3;
+* Cloudflare Tunnel / VPS relay;
+* VTT;
+* веб-плеер;
+* сложный speaker remapping;
+* оптимизация diarization;
+* облачная обработка;
+* jobs.db;
+* LLM-summary слой.
+
+Эти части могут быть добавлены позже, когда локальный файловый пайплайн станет достаточно устойчивым.
 
 ---
 
 ## Требования
 
-Проверенная базовая среда:
-
 * Windows 11;
-* conda;
+* Python / conda;
 * установленный `ffmpeg`;
 * установленный и рабочий WhisperX;
-* Hugging Face token, если используется diarization / pyannote.
+* локальное conda-окружение;
+* Hugging Face token, если включена diarization;
+* локальный Hugging Face cache.
 
-В примерах ниже `<PROJECT_ROOT>` — папка, куда склонирован проект.
-
-Например:
+Базовый локальный путь проекта в рабочей установке:
 
 ```bat
-cd /d C:\whisperx_ru
+C:\whisperx_ru
+```
+
+Базовое conda-окружение:
+
+```bat
+whisperx-ru
 ```
 
 ---
 
 ## Быстрый старт
 
-### 1. Склонировать проект
+Перейти в папку проекта:
 
 ```bat
-cd /d C:\
-git clone <REPO_URL> whisperx_ru
 cd /d C:\whisperx_ru
-```
-
-### 2. Создать окружение
-
-Если есть `environment.yml`:
-
-```bat
-conda env create -f environment.yml
 conda activate whisperx-ru
 ```
 
-Если окружение уже создано:
+Создать локальные папки после clone или переноса проекта:
 
 ```bat
-conda activate whisperx-ru
+python scripts\pipeline.py init
 ```
 
-### 3. Создать локальные папки
+Проверить окружение:
 
 ```bat
-python scripts\init_dirs.py
+python scripts\pipeline.py doctor
 ```
 
-### 4. Создать локальный конфиг
-
-```bat
-copy config\whisperx_config.example.json config\whisperx_config.json
-```
-
-Файл `config/whisperx_config.json` локальный и не должен попадать в Git.
-
-### 5. Создать локальный `.env`
-
-```bat
-copy .env.example .env
-```
-
-Если diarization не используется:
-
-```env
-HF_TOKEN=
-```
-
-Если diarization включена:
-
-```env
-HF_TOKEN=your_huggingface_token_here
-```
-
-Файл `.env` локальный и не должен попадать в Git.
-
-### 6. Положить файл в landing
+Положить файл встречи в:
 
 ```text
-data\landing\meeting.m4a
+data\landing
 ```
 
-### 7. Проверить dry-run
+Проверить, какие файлы будут обработаны:
 
 ```bat
-python scripts\process_landing_once.py --dry-run --show-sizes
+python scripts\pipeline.py process --dry-run --show-sizes
 ```
 
-### 8. Запустить обработку
-
-Один файл:
+Запустить обработку landing:
 
 ```bat
-python scripts\process_one_file.py --input data\landing\meeting.m4a
+python scripts\pipeline.py process
 ```
 
-Все готовые файлы из `landing`:
+Проверить состояние хранилища:
 
 ```bat
-python scripts\process_landing_once.py
+python scripts\pipeline.py status
 ```
 
-### 9. Проверить состояние
+---
+
+## Основной CLI
+
+Основной пользовательский CLI:
 
 ```bat
-python scripts\status_jobs.py
+python scripts\pipeline.py <command>
 ```
+
+Доступные команды:
+
+```bat
+python scripts\pipeline.py process
+python scripts\pipeline.py status
+python scripts\pipeline.py repair --job-id <failed_job_id>
+python scripts\pipeline.py doctor
+python scripts\pipeline.py init
+```
+
+`pipeline.py` — это тонкий façade над существующими скриптами. Он не заменяет инженерные инструменты, а даёт единый вход для обычной эксплуатации и будущего UI/API.
+
+---
+
+## Основные команды
+
+### Обработка всех готовых файлов из landing
+
+```bat
+python scripts\pipeline.py process
+```
+
+Dry-run:
+
+```bat
+python scripts\pipeline.py process --dry-run --show-sizes
+```
+
+Ограничить количество файлов:
+
+```bat
+python scripts\pipeline.py process --limit 2
+```
+
+Продолжать после ошибки:
+
+```bat
+python scripts\pipeline.py process --continue-on-error
+```
+
+---
+
+### Обработка одного файла
+
+```bat
+python scripts\pipeline.py process --input data\landing\meeting.m4a
+```
+
+---
+
+### Проверка статуса
+
+```bat
+python scripts\pipeline.py status
+```
+
+Только landing:
+
+```bat
+python scripts\pipeline.py status --landing
+```
+
+Только failed:
+
+```bat
+python scripts\pipeline.py status --failed
+```
+
+JSON-вывод:
+
+```bat
+python scripts\pipeline.py status --json
+```
+
+---
+
+### Диагностика
+
+```bat
+python scripts\pipeline.py doctor
+```
+
+Подробный вывод:
+
+```bat
+python scripts\pipeline.py doctor --verbose
+```
+
+JSON-вывод:
+
+```bat
+python scripts\pipeline.py doctor --json
+```
+
+---
+
+### Восстановление failed job
+
+Автоматически выбрать лучший способ восстановления:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id>
+```
+
+Dry-run:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id> --dry-run
+```
+
+Принудительно repair из silver JSON:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id> --mode silver
+```
+
+Принудительно полный retry от bronze:
+
+```bat
+python scripts\pipeline.py repair --job-id <failed_job_id> --mode bronze
+```
+
+В режиме `auto` логика такая:
+
+1. если есть `silver/asr_json/<job_id>.json`, выполняется быстрый repair gold;
+2. если silver JSON нет, но есть bronze original, выполняется полный retry от bronze;
+3. если нет ни silver, ни bronze, выводится ошибка.
+
+---
+
+## Инженерные скрипты
+
+Низкоуровневые скрипты остаются доступны напрямую:
+
+```text
+scripts\process_one_file.py
+scripts\process_landing_once.py
+scripts\status_jobs.py
+scripts\retry_failed_job.py
+scripts\repair_gold_from_json.py
+scripts\run_whisperx.py
+scripts\init_dirs.py
+```
+
+Они нужны для отладки, диагностики и точечного восстановления.
+
+Обычный пользовательский flow должен идти через:
+
+```bat
+python scripts\pipeline.py ...
+```
+
+---
+
+## Dev-инструменты
+
+### Smoke tests
+
+Smoke tests находятся отдельно от эксплуатационного CLI:
+
+```bat
+python tests\smoke_tests.py
+```
+
+Если нужно пропустить `doctor`:
+
+```bat
+python tests\smoke_tests.py --skip-doctor
+```
+
+JSON-вывод:
+
+```bat
+python tests\smoke_tests.py --json
+```
+
+Smoke tests не запускают реальную транскрибацию. Они проверяют:
+
+* `py_compile` основных скриптов;
+* help-команды `pipeline.py`;
+* `pipeline.py init`;
+* `pipeline.py status --json`;
+* `pipeline.py process --dry-run --show-sizes`;
+* опционально `pipeline.py doctor`.
+
+---
+
+### Локальный backup скриптов
+
+Перед ручными правками можно создать локальный backup:
+
+```bat
+python tools\backup_scripts.py --include-docs --label before_next_edit
+```
+
+Только список файлов:
+
+```bat
+python tools\backup_scripts.py --list
+```
+
+Dry-run:
+
+```bat
+python tools\backup_scripts.py --dry-run
+```
+
+Backup складывается в:
+
+```text
+.local_backups
+```
+
+Эта папка не попадает в Git.
 
 ---
 
 ## Структура проекта
 
 ```text
-<PROJECT_ROOT>
+C:\whisperx_ru
 ├── data
 │   ├── landing
 │   ├── bronze
@@ -182,257 +381,50 @@ python scripts\status_jobs.py
 │   ├── failed
 │   └── archive
 ├── scripts
-│   ├── init_dirs.py
-│   ├── project_paths.py
+│   ├── pipeline.py
 │   ├── run_whisperx.py
 │   ├── process_one_file.py
 │   ├── process_landing_once.py
 │   ├── status_jobs.py
 │   ├── retry_failed_job.py
 │   ├── repair_gold_from_json.py
-│   └── format_whisperx_json.py
+│   ├── format_whisperx_json.py
+│   ├── project_paths.py
+│   └── init_dirs.py
+├── tests
+│   └── smoke_tests.py
+├── tools
+│   └── backup_scripts.py
 ├── config
-│   └── whisperx_config.example.json
+│   ├── whisperx_config.example.json
+│   └── whisperx_config.json
 ├── docs
 │   └── PIPELINE_DETAILS.md
 ├── hf_cache
 ├── .env.example
+├── .env
 ├── .gitignore
+├── environment.yml
 └── README.md
-```
-
----
-
-## Основные команды
-
-### Обработка одного файла
-
-```bat
-python scripts\process_one_file.py --input data\landing\meeting.m4a
-```
-
-### Обработка всех файлов из landing
-
-```bat
-python scripts\process_landing_once.py
-```
-
-### Проверка состояния
-
-```bat
-python scripts\status_jobs.py
-```
-
-### Полный retry от bronze
-
-```bat
-python scripts\retry_failed_job.py --job-id <failed_job_id>
-```
-
-### Быстрый repair из silver JSON
-
-```bat
-python scripts\repair_gold_from_json.py --job-id <failed_job_id>
-```
-
----
-
-## Параметры скриптов
-
-### `process_one_file.py`
-
-Главный пайплайн обработки одного файла.
-
-```bat
-python scripts\process_one_file.py --input <path>
-```
-
-| Параметр                     | Назначение                                                                                                           |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `--input <path>`             | Входной аудио/видео файл. Обычно файл из `data/landing`.                                                             |
-| `--keep-processing`          | Не удалять `data/processing/<job_id>` после success. Полезно для отладки.                                            |
-| `--from-bronze`              | Использовать уже принятый файл из `bronze`, не переносить его заново. Обычно вызывается через `retry_failed_job.py`. |
-| `--original-filename <name>` | Исходное пользовательское имя файла для retry/from-bronze режима.                                                    |
-| `--retry-of-job-id <job_id>` | ID failed job, от которой создаётся новая попытка.                                                                   |
-
-Обычный пользовательский запуск:
-
-```bat
-python scripts\process_one_file.py --input data\landing\meeting.m4a
-```
-
----
-
-### `process_landing_once.py`
-
-Однократная пакетная обработка файлов из `data/landing`.
-
-```bat
-python scripts\process_landing_once.py
-```
-
-| Параметр              | Назначение                                                           |
-| --------------------- | -------------------------------------------------------------------- |
-| `--dry-run`           | Только показать, какие файлы будут обработаны.                       |
-| `--show-sizes`        | Показать размеры файлов в списке.                                    |
-| `--limit N`           | Обработать максимум `N` файлов.                                      |
-| `--newest-first`      | Обрабатывать сначала самые новые файлы. По умолчанию сначала старые. |
-| `--continue-on-error` | Не останавливаться на первой ошибке.                                 |
-| `--keep-processing`   | Передать `--keep-processing` в `process_one_file.py`.                |
-
-Примеры:
-
-```bat
-python scripts\process_landing_once.py --dry-run --show-sizes
-python scripts\process_landing_once.py --limit 2
-python scripts\process_landing_once.py --continue-on-error
-```
-
----
-
-### `status_jobs.py`
-
-Read-only аудит состояния локального хранилища.
-
-```bat
-python scripts\status_jobs.py
-```
-
-| Параметр            | Назначение                                                               |
-| ------------------- | ------------------------------------------------------------------------ |
-| `--limit N`         | Сколько элементов показывать в каждой секции.                            |
-| `--sizes`           | Посчитать размеры файлов/папок. Может быть медленнее на больших архивах. |
-| `--orphan-hours N`  | Через сколько часов `processing` считать кандидатом в orphan.            |
-| `--json`            | Вывести полный отчёт в JSON.                                             |
-| `--landing-only`    | Показать только `landing`.                                               |
-| `--processing-only` | Показать только `processing`.                                            |
-| `--failed-only`     | Показать только `failed`.                                                |
-| `--gold-only`       | Показать только `gold`.                                                  |
-
-Примеры:
-
-```bat
-python scripts\status_jobs.py
-python scripts\status_jobs.py --failed-only
-python scripts\status_jobs.py --gold-only
-python scripts\status_jobs.py --json
-```
-
----
-
-### `retry_failed_job.py`
-
-Полный retry failed job от исходника в `bronze`.
-
-```bat
-python scripts\retry_failed_job.py --job-id <failed_job_id>
-```
-
-| Параметр              | Назначение                                                |
-| --------------------- | --------------------------------------------------------- |
-| `--job-id <job_id>`   | ID failed job из `data/failed/<job_id>`.                  |
-| `--failed-dir <path>` | Прямой путь к папке failed job.                           |
-| `--keep-processing`   | Сохранить `processing` после успешного retry для отладки. |
-
-Используется, если WhisperX не дошёл до готового JSON.
-
----
-
-### `repair_gold_from_json.py`
-
-Быстрый repair `gold` из уже готового `silver/asr_json`.
-
-```bat
-python scripts\repair_gold_from_json.py --job-id <failed_job_id>
-```
-
-| Параметр                     | Назначение                                             |
-| ---------------------------- | ------------------------------------------------------ |
-| `--job-id <job_id>`          | ID failed job из `data/failed/<job_id>`.               |
-| `--failed-dir <path>`        | Прямой путь к папке failed job.                        |
-| `--json <path>`              | Прямой путь к `silver/asr_json/*.json`.                |
-| `--original-filename <name>` | Исходное имя файла. Нужно при запуске через `--json`.  |
-| `--no-mark-retried`          | Не создавать `RETRIED_SUCCESSFULLY.json` в failed job. |
-
-Примеры:
-
-```bat
-python scripts\repair_gold_from_json.py --job-id <failed_job_id>
-
-python scripts\repair_gold_from_json.py ^
-  --json data\silver\asr_json\<job_id>.json ^
-  --original-filename meeting.m4a
-```
-
-Используется, если WhisperX уже создал JSON, но `gold` отсутствует или некорректен.
-
----
-
-### `run_whisperx.py`
-
-Wrapper над WhisperX.
-
-Обычно вызывается из `process_one_file.py`.
-
-```bat
-python scripts\run_whisperx.py <input_file>
-```
-
-| Параметр              | Назначение                                                       |
-| --------------------- | ---------------------------------------------------------------- |
-| `input_file`          | Входной файл или путь к нему.                                    |
-| `--config <path>`     | Путь к JSON-конфигу. По умолчанию `config/whisperx_config.json`. |
-| `--output-dir <path>` | Папка для технического вывода WhisperX.                          |
-
-Обычному пользователю чаще не нужно запускать этот скрипт напрямую.
-
----
-
-### `init_dirs.py`
-
-Создаёт локальную структуру папок.
-
-```bat
-python scripts\init_dirs.py
-```
-
-Параметров нет.
-
----
-
-### `format_whisperx_json.py`
-
-Вспомогательный форматтер TXT/MD из WhisperX JSON.
-
-В основном пайплайне сейчас не вызывается автоматически, потому что `gold` хранит raw JSON с word-level таймингами.
-
-Параметры зависят от текущей версии скрипта:
-
-```bat
-python scripts\format_whisperx_json.py --help
 ```
 
 ---
 
 ## Конфигурация
 
-Публичный example-конфиг:
+Публичный пример конфига:
 
 ```text
-config/whisperx_config.example.json
+config\whisperx_config.example.json
 ```
 
 Локальный рабочий конфиг:
 
 ```text
-config/whisperx_config.json
+config\whisperx_config.json
 ```
 
-Создать локальный конфиг:
-
-```bat
-copy config\whisperx_config.example.json config\whisperx_config.json
-```
+Локальный конфиг не коммитится.
 
 Пример:
 
@@ -456,55 +448,101 @@ copy config\whisperx_config.example.json config\whisperx_config.json
 }
 ```
 
-`hf_cache_dir` можно указывать относительным путём. Тогда он будет считаться от корня проекта.
+---
+
+## Секреты
+
+Публичный пример:
+
+```text
+.env.example
+```
+
+Локальный файл:
+
+```text
+.env
+```
+
+Пример локального `.env`:
+
+```env
+HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+`.env` не коммитится.
 
 ---
 
-## Секреты и данные
+## Что не попадает в Git
 
-Не коммитьте:
+В Git не должны попадать:
 
-* реальные аудио/видео записи;
-* raw WhisperX JSON;
-* результаты `gold`;
-* failed jobs;
-* логи;
-* Hugging Face cache;
-* Hugging Face token;
-* локальный `.env`;
-* локальный `config/whisperx_config.json`.
+```text
+.env
+config/whisperx_config.json
+data/landing/*
+data/bronze/raw_original/*
+data/processing/*
+data/silver/asr_json/*
+data/silver/audio_flac/*
+data/gold/transcripts/*
+data/failed/*
+hf_cache/*
+.local_backups/*
+backup*
+*.bak
+__pycache__
+```
 
-В репозитории должны быть только:
+В Git попадают только `.gitkeep` для сохранения структуры папок.
 
-* код;
-* example-конфиги;
-* `.gitkeep`;
-* документация;
-* `.env.example`;
-* `.gitignore`.
+---
 
-Перед commit полезно проверить:
+## Проверки перед commit
 
 ```bat
+python tests\smoke_tests.py --skip-doctor
 git status --short --untracked-files=all
 git add --dry-run .
 ```
+
+Sensitive check:
+
+```bat
+findstr /s /n /i "C:\\whisperx_ru C:/whisperx_ru hf_ token secret HUGGINGFACE PYANNOTE_AUTH retry_fail SYNTHETIC" scripts\*.py tests\*.py tools\*.py config\*.json *.md .env.example environment.yml
+```
+
+Нормально, если находятся только имена переменных, placeholder-строки и `hf_cache`.
+
+Ненормально, если находятся:
+
+* реальный `hf_...` token;
+* реальные имена встреч;
+* реальные job_id;
+* реальные JSON/FLAC/TXT результаты;
+* локальные абсолютные пути, зашитые в код.
 
 ---
 
 ## Roadmap
 
-Возможные следующие шаги:
+Ближайшие шаги:
 
-* `cleanup_old_jobs.py` с `--dry-run`;
-* `recover_orphaned_processing.py`;
-* `jobs.db` для продуктового статуса;
-* Airflow DAG поверх `process_one_file.py`;
-* веб-интерфейс загрузки/скачивания;
-* SFTP/upload;
-* speaker remapping;
-* генерация user-friendly TXT/MD отдельным этапом;
-* VTT/WebVTT;
-* веб-плеер.
+1. `check_storage_integrity.py` — проверка целостности файлового хранилища;
+2. интеграция краткой integrity-сводки в `pipeline.py doctor`;
+3. `recover_orphaned_processing.py` — безопасное восстановление orphaned processing;
+4. `cleanup_old_jobs.py` — безопасная очистка временных/старых данных через dry-run;
+5. GitHub Actions для `tests/smoke_tests.py --skip-doctor`;
+6. `jobs.db` как индекс для будущего UI;
+7. UI/API слой;
+8. Airflow как оркестратор уже готовых CLI-команд.
 
-Airflow в будущей архитектуре должен быть оркестратором, а не хранилищем больших файлов.
+Принцип развития:
+
+```text
+Не добавлять новые обязательные ручные шаги.
+Добавлять внутренние инструменты.
+Оборачивать их в единый CLI или будущий UI.
+Сначала устойчивость и наблюдаемость, потом DB/UI/Airflow.
+```
