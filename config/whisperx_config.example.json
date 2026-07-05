@@ -1,0 +1,22 @@
+{
+  "language": "ru",
+  "model": "large-v3",
+  "device": "cpu",
+  "compute_type": "int8",
+  "batch_size": 4,
+  "threads": 16,
+
+  "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-russian",
+
+  "diarize": false,
+  "min_speakers": null,
+  "max_speakers": null,
+
+  "output_format": "json",
+
+  "vad_method": "silero",
+  "vad_onset": 0.3,
+  "vad_offset": 0.2,
+
+  "hf_cache_dir": "hf_cache"
+}

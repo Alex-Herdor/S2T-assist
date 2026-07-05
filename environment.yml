@@ -1,0 +1,5 @@
+name: whisperx-ru
+channels:
+  - defaults
+dependencies:
+  - python=3.10

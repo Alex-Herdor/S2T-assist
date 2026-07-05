@@ -1,0 +1,107 @@
+# =========================
+# Local data / artifacts
+# =========================
+
+data/landing/*
+!data/landing/.gitkeep
+
+data/bronze/*
+!data/bronze/.gitkeep
+!data/bronze/raw_original/
+data/bronze/raw_original/*
+!data/bronze/raw_original/.gitkeep
+
+data/processing/*
+!data/processing/.gitkeep
+
+data/silver/*
+!data/silver/.gitkeep
+!data/silver/audio_flac/
+data/silver/audio_flac/*
+!data/silver/audio_flac/.gitkeep
+!data/silver/asr_json/
+data/silver/asr_json/*
+!data/silver/asr_json/.gitkeep
+
+data/gold/*
+!data/gold/.gitkeep
+!data/gold/transcripts/
+data/gold/transcripts/*
+!data/gold/transcripts/.gitkeep
+
+data/failed/*
+!data/failed/.gitkeep
+
+data/archive/*
+!data/archive/.gitkeep
+
+# =========================
+# Hugging Face / model cache
+# =========================
+
+hf_cache/*
+!hf_cache/.gitkeep
+
+.cache/
+models/
+model_cache/
+
+# =========================
+# Local configs / secrets
+# =========================
+
+.env
+.env.*
+!.env.example
+
+config/whisperx_config.json
+config/secrets.json
+config/local_paths.json
+
+*.token
+*token*.txt
+*secret*.txt
+*secrets*.json
+
+# =========================
+# Logs / temp
+# =========================
+
+*.log
+logs/
+tmp/
+temp/
+
+# =========================
+# Python
+# =========================
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# =========================
+# Backups / local experiments
+# =========================
+
+*.bak
+*.bak_*
+*.backup
+*.TEMP_FAIL_TEST
+*.old
+backup*/
+scripts/backup*/
+
+# =========================
+# OS / IDE
+# =========================
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
