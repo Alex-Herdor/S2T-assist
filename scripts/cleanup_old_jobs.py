@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,15 @@ class CleanupCandidate:
     age_hours: float | None = None
     suggested_action: str | None = None
     notes: str | None = None
+
+
+@dataclass
+class DeleteResult:
+    status: str
+    category: str
+    path: str
+    size_bytes: int
+    message: str
 
 
 def rel_path(path: Path) -> str:
@@ -505,9 +515,209 @@ def summarize(candidates: list[CleanupCandidate]) -> dict[str, Any]:
     }
 
 
-def print_json_output(candidates: list[CleanupCandidate], args: argparse.Namespace) -> None:
+def attention_summary(candidates: list[CleanupCandidate]) -> dict[str, int]:
+    important_categories = {
+        "retried_failed",
+        "old_processing",
+        "processing_cleanup_failed",
+    }
+
+    result: dict[str, int] = {}
+
+    for item in candidates:
+        if item.category in important_categories:
+            result[item.category] = result.get(item.category, 0) + 1
+
+    return dict(sorted(result.items()))
+    
+    
+def delete_allowed_categories(args: argparse.Namespace) -> set[str]:
+    allowed: set[str] = set()
+
+    if args.delete_pycache:
+        allowed.add("pycache")
+
+    if args.delete_backup_files_older_than_days is not None:
+        allowed.add("backup_files")
+
+    if args.delete_local_backups_older_than_days is not None:
+        allowed.add("local_backups")
+
+    if args.delete_logs_older_than_days is not None:
+        allowed.add("logs")
+
+    return allowed
+
+
+def has_delete_request(args: argparse.Namespace) -> bool:
+    return bool(delete_allowed_categories(args))
+
+
+def is_safe_delete_candidate(candidate: CleanupCandidate, allowed_categories: set[str]) -> bool:
+    if candidate.level != "safe":
+        return False
+
+    if candidate.category not in allowed_categories:
+        return False
+
+    return True
+
+
+def resolve_candidate_path(candidate: CleanupCandidate) -> Path:
+    path = Path(candidate.path)
+
+    if path.is_absolute():
+        return path
+
+    return PROJECT_ROOT / path
+
+
+def is_path_inside_project(path: Path) -> bool:
+    try:
+        path.resolve().relative_to(PROJECT_ROOT.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def delete_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+
+    if path.is_file():
+        path.unlink()
+        return
+
+    raise RuntimeError("Path is neither file nor directory")
+
+
+def execute_deletions(
+    candidates: list[CleanupCandidate],
+    args: argparse.Namespace,
+) -> list[DeleteResult]:
+    allowed_categories = delete_allowed_categories(args)
+    results: list[DeleteResult] = []
+
+    if not allowed_categories:
+        return results
+
+    for candidate in candidates:
+        if not is_safe_delete_candidate(candidate, allowed_categories):
+            continue
+
+        path = resolve_candidate_path(candidate)
+
+        if not is_path_inside_project(path):
+            results.append(
+                DeleteResult(
+                    status="skipped",
+                    category=candidate.category,
+                    path=candidate.path,
+                    size_bytes=candidate.size_bytes,
+                    message="Path is outside PROJECT_ROOT.",
+                )
+            )
+            continue
+
+        if not path.exists():
+            results.append(
+                DeleteResult(
+                    status="skipped",
+                    category=candidate.category,
+                    path=candidate.path,
+                    size_bytes=candidate.size_bytes,
+                    message="Path does not exist.",
+                )
+            )
+            continue
+
+        if not args.yes:
+            results.append(
+                DeleteResult(
+                    status="planned",
+                    category=candidate.category,
+                    path=candidate.path,
+                    size_bytes=candidate.size_bytes,
+                    message="Deletion requested, but --yes was not provided.",
+                )
+            )
+            continue
+
+        try:
+            delete_path(path)
+            results.append(
+                DeleteResult(
+                    status="deleted",
+                    category=candidate.category,
+                    path=candidate.path,
+                    size_bytes=candidate.size_bytes,
+                    message="Deleted.",
+                )
+            )
+        except Exception as exc:
+            results.append(
+                DeleteResult(
+                    status="error",
+                    category=candidate.category,
+                    path=candidate.path,
+                    size_bytes=candidate.size_bytes,
+                    message=str(exc),
+                )
+            )
+
+    return results
+
+
+def summarize_delete_results(results: list[DeleteResult]) -> dict[str, Any]:
+    by_status: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    size_by_status: dict[str, int] = {}
+
+    total_size = 0
+
+    for item in results:
+        by_status[item.status] = by_status.get(item.status, 0) + 1
+        by_category[item.category] = by_category.get(item.category, 0) + 1
+        size_by_status[item.status] = size_by_status.get(item.status, 0) + item.size_bytes
+        total_size += item.size_bytes
+
+    return {
+        "total": len(results),
+        "by_status": dict(sorted(by_status.items())),
+        "by_category": dict(sorted(by_category.items())),
+        "total_size_bytes": total_size,
+        "total_size_human": format_size(total_size),
+        "size_by_status": {
+            key: {
+                "bytes": value,
+                "human": format_size(value),
+            }
+            for key, value in sorted(size_by_status.items())
+        },
+    }
+
+
+def delete_result_to_dict(result: DeleteResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "category": result.category,
+        "path": result.path,
+        "size_bytes": result.size_bytes,
+        "size_human": format_size(result.size_bytes),
+        "message": result.message,
+    }
+
+
+def print_json_output(
+    candidates: list[CleanupCandidate],
+    args: argparse.Namespace,
+    delete_results: list[DeleteResult],
+) -> None:
     payload = {
-        "mode": "diagnostic_only",
+        "mode": "delete" if has_delete_request(args) else "diagnostic_only",
+        "delete_requested": has_delete_request(args),
+        "delete_confirmed": bool(args.yes),
         "project_root": str(PROJECT_ROOT),
         "thresholds": {
             "local_backup_days": args.local_backup_days,
@@ -517,7 +727,10 @@ def print_json_output(candidates: list[CleanupCandidate], args: argparse.Namespa
             "processing_days": args.processing_days,
         },
         "summary": summarize(candidates),
+        "attention": attention_summary(candidates),
+        "delete_summary": summarize_delete_results(delete_results),
         "candidates": [candidate_to_dict(item) for item in candidates],
+        "delete_results": [delete_result_to_dict(item) for item in delete_results],
     }
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -526,15 +739,21 @@ def print_json_output(candidates: list[CleanupCandidate], args: argparse.Namespa
 def print_text_output(
     candidates: list[CleanupCandidate],
     args: argparse.Namespace,
+    delete_results: list[DeleteResult],
 ) -> None:
     summary = summarize(candidates)
+    attention = attention_summary(candidates)
+    delete_summary = summarize_delete_results(delete_results)
+
+    mode = "delete" if has_delete_request(args) else "diagnostic_only"
 
     print("")
     print("=" * 100)
-    print("CLEANUP OLD JOBS - DIAGNOSTIC ONLY")
+    print("CLEANUP OLD JOBS")
     print("=" * 100)
     print(f"project_root:       {PROJECT_ROOT}")
-    print("mode:               diagnostic_only")
+    print(f"mode:               {mode}")
+    print(f"delete_confirmed:   {bool(args.yes)}")
     print(
         "thresholds:         "
         f"local_backups>{args.local_backup_days:g}d "
@@ -549,6 +768,27 @@ def print_text_output(
     )
     print(f"by_level:           {summary['by_level'] or '-'}")
     print(f"by_category:        {summary['by_category'] or '-'}")
+
+    if attention:
+        attention_text = " ".join(
+            f"{key}={value}"
+            for key, value in attention.items()
+        )
+        print(f"attention:          {attention_text}")
+        print("attention_note:     CAUTION-категории только подсвечиваются и не удаляются этим инструментом.")
+    else:
+        print("attention:          -")
+
+    if has_delete_request(args):
+        print(
+            f"delete_summary:     total={delete_summary['total']} "
+            f"size={delete_summary['total_size_human']} "
+            f"by_status={delete_summary['by_status'] or '-'}"
+        )
+
+        if not args.yes:
+            print("delete_note:        Удаление НЕ выполнено, потому что не указан --yes.")
+
     print("=" * 100)
 
     if not candidates:
@@ -578,31 +818,49 @@ def print_text_output(
     if not visible:
         print("[OK] Нет кандидатов после применения фильтров.")
         print("")
-        return
+    else:
+        for item in visible:
+            prefix = {
+                "safe": "SAFE",
+                "caution": "CAUTION",
+                "info": "INFO",
+            }.get(item.level, item.level.upper())
 
-    for item in visible:
-        prefix = {
-            "safe": "SAFE",
-            "caution": "CAUTION",
-            "info": "INFO",
-        }.get(item.level, item.level.upper())
+            print(f"[{prefix}] {item.category}: {item.reason}")
+            print(f"       path: {item.path}")
+            print(f"       size: {format_size(item.size_bytes)}")
 
-        print(f"[{prefix}] {item.category}: {item.reason}")
-        print(f"       path: {item.path}")
-        print(f"       size: {format_size(item.size_bytes)}")
+            if item.age_hours is not None:
+                print(f"       age:  {item.age_hours / 24:.2f} days")
 
-        if item.age_hours is not None:
-            print(f"       age:  {item.age_hours / 24:.2f} days")
+            if args.verbose:
+                if item.suggested_action:
+                    print(f"       suggested_action: {item.suggested_action}")
 
-        if args.verbose:
-            if item.suggested_action:
-                print(f"       suggested_action: {item.suggested_action}")
+                if item.notes:
+                    print(f"       notes: {item.notes}")
 
-            if item.notes:
-                print(f"       notes: {item.notes}")
+    if delete_results:
+        print("")
+        print("-" * 100)
+        print("DELETE RESULTS")
+        print("-" * 100)
+
+        for item in delete_results:
+            prefix = {
+                "planned": "PLANNED",
+                "deleted": "DELETED",
+                "skipped": "SKIPPED",
+                "error": "ERROR",
+            }.get(item.status, item.status.upper())
+
+            print(f"[{prefix}] {item.category}: {item.path}")
+            print(f"       size:    {format_size(item.size_bytes)}")
+            print(f"       message: {item.message}")
 
     print("")
-    print("Важно: этот скрипт сейчас ничего не удаляет. Удаляющие режимы будут добавлены отдельно.")
+    print("CAUTION-категории retried_failed / old_processing / processing_cleanup_failed сейчас не удаляются.")
+    print("Для SAFE-удаления нужен явный --delete-* флаг и --yes.")
     print("")
 
 
@@ -687,6 +945,39 @@ def parse_args() -> argparse.Namespace:
         default=7.0,
         help="Возраст processing job для попадания в caution-кандидаты.",
     )
+    
+    parser.add_argument(
+        "--delete-pycache",
+        action="store_true",
+        help="Удалить SAFE-кандидаты категории pycache. Требует --yes.",
+    )
+
+    parser.add_argument(
+        "--delete-backup-files-older-than-days",
+        type=float,
+        default=None,
+        help="Удалить SAFE .bak/.old/.backup файлы старше N дней. Требует --yes.",
+    )
+
+    parser.add_argument(
+        "--delete-local-backups-older-than-days",
+        type=float,
+        default=None,
+        help="Удалить SAFE .local_backups старше N дней. Требует --yes.",
+    )
+
+    parser.add_argument(
+        "--delete-logs-older-than-days",
+        type=float,
+        default=None,
+        help="Удалить SAFE logs/* файлы старше N дней. Требует --yes.",
+    )
+
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Подтверждение удаления для SAFE-кандидатов. Без --yes удаление не выполняется.",
+    )
 
     return parser.parse_args()
 
@@ -694,19 +985,53 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    local_backup_days = (
+        args.delete_local_backups_older_than_days
+        if args.delete_local_backups_older_than_days is not None
+        else args.local_backup_days
+    )
+
+    bak_days = (
+        args.delete_backup_files_older_than_days
+        if args.delete_backup_files_older_than_days is not None
+        else args.bak_days
+    )
+
+    log_days = (
+        args.delete_logs_older_than_days
+        if args.delete_logs_older_than_days is not None
+        else args.log_days
+    )
+
     candidates = collect_candidates(
-        local_backup_days=args.local_backup_days,
-        bak_days=args.bak_days,
-        log_days=args.log_days,
+        local_backup_days=local_backup_days,
+        bak_days=bak_days,
+        log_days=log_days,
         failed_days=args.failed_days,
         processing_days=args.processing_days,
         include_young_backups=args.include_young_backups,
     )
 
+    delete_results = execute_deletions(
+        candidates=candidates,
+        args=args,
+    )
+
     if args.json:
-        print_json_output(candidates, args)
+        print_json_output(
+            candidates=candidates,
+            args=args,
+            delete_results=delete_results,
+        )
     else:
-        print_text_output(candidates, args)
+        print_text_output(
+            candidates=candidates,
+            args=args,
+            delete_results=delete_results,
+        )
+
+    if any(item.status == "error" for item in delete_results):
+        return 2
 
     return 0
 
