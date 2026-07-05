@@ -1,0 +1,29 @@
+name: Smoke tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Show Python version
+        run: python --version
+
+      - name: Run smoke tests
+        run: python tests/smoke_tests.py --skip-doctor --skip-integrity

@@ -742,6 +742,54 @@ Smoke tests не запускают реальную транскрибацию.
 
 ---
 
+## GitHub Actions
+
+Минимальный CI workflow находится здесь:
+
+```text
+.github/workflows/smoke.yml
+```
+
+Он запускает:
+
+```bash
+python tests/smoke_tests.py --skip-doctor --skip-integrity
+```
+
+Это не end-to-end тест ASR pipeline. GitHub Actions используется только как быстрый предохранитель от поломки кода и CLI-контрактов.
+
+Что проверяется в CI:
+
+```text
+py_compile основных скриптов
+pipeline.py --help
+pipeline.py process/status/repair/doctor/init --help
+pipeline.py init
+pipeline.py status --json
+pipeline.py process --dry-run --show-sizes
+```
+
+Что намеренно не проверяется в CI:
+
+```text
+WhisperX
+ffmpeg
+Hugging Face token
+локальный whisperx_config.json
+реальное data-хранилище
+storage integrity реальных job
+реальная транскрибация
+```
+
+Причина: CI не является копией локального mini-PC. Его задача — быстро показать, что изменения в репозитории не сломали базовый Python/CLI слой.
+
+Локальная проверка остаётся более полной:
+
+```bat
+python tests\smoke_tests.py --skip-doctor
+python tests\smoke_tests.py
+```
+
 ## Локальный backup перед правками
 
 Для быстрой страховки перед ручными изменениями используется:

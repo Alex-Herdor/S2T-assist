@@ -503,6 +503,59 @@ Smoke tests не запускают реальную транскрибацию.
 
 ---
 
+### GitHub Actions
+
+В репозитории есть минимальный CI workflow:
+
+```text
+.github/workflows/smoke.yml
+```
+
+Он запускается на:
+
+```text
+push
+pull_request
+workflow_dispatch
+```
+
+CI-команда:
+
+```bash
+python tests/smoke_tests.py --skip-doctor --skip-integrity
+```
+
+В GitHub Actions intentionally не запускаются:
+
+```text
+pipeline.py doctor
+storage integrity check
+реальная WhisperX-обработка
+```
+
+Причина: в CI нет локального Windows/conda окружения, WhisperX-моделей, ffmpeg, `.env`, Hugging Face cache и реальных файлов `data`.
+
+Назначение GitHub Actions на текущем этапе:
+
+```text
+поймать синтаксические ошибки
+поймать сломанный pipeline.py help
+поймать сломанный CLI contract
+проверить базовый smoke без локальных данных и моделей
+```
+
+Локально перед commit всё равно полезно запускать:
+
+```bat
+python tests\smoke_tests.py --skip-doctor
+```
+
+А полный локальный smoke, если окружение готово:
+
+```bat
+python tests\smoke_tests.py
+```
+
 ### Локальный backup скриптов
 
 Перед ручными правками можно создать локальный backup:
