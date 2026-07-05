@@ -14,6 +14,7 @@ PROJECT_ROOT = TESTS_DIR.parent
 SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
 PIPELINE_SCRIPT = SCRIPT_DIR / "pipeline.py"
+CHECK_STORAGE_INTEGRITY_SCRIPT = SCRIPT_DIR / "check_storage_integrity.py"
 
 SCRIPTS_TO_COMPILE = [
     SCRIPT_DIR / "project_paths.py",
@@ -23,6 +24,7 @@ SCRIPTS_TO_COMPILE = [
     SCRIPT_DIR / "status_jobs.py",
     SCRIPT_DIR / "retry_failed_job.py",
     SCRIPT_DIR / "repair_gold_from_json.py",
+    CHECK_STORAGE_INTEGRITY_SCRIPT,
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
 ]
@@ -104,6 +106,7 @@ def compile_script(script_path: Path) -> SmokeResult:
 
 def collect_smoke_results(
     skip_doctor: bool,
+    skip_integrity: bool,
     verbose: bool,
 ) -> list[SmokeResult]:
     results: list[SmokeResult] = []
@@ -140,6 +143,14 @@ def collect_smoke_results(
             ],
         ),
     ]
+    
+    if not skip_integrity:
+        runtime_commands.append(
+            (
+                "storage:integrity",
+                [sys.executable, str(CHECK_STORAGE_INTEGRITY_SCRIPT)],
+            )
+        )
 
     if not skip_doctor:
         runtime_commands.append(
@@ -238,6 +249,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Не запускать pipeline.py doctor. Полезно для CI или окружений без WhisperX/ffmpeg.",
     )
+    
+    parser.add_argument(
+        "--skip-integrity",
+        action="store_true",
+        help=(
+            "Не запускать check_storage_integrity.py. "
+            "Полезно, если локальные данные временно находятся в переходном состоянии."
+        ),
+    )
 
     parser.add_argument(
         "--json",
@@ -259,6 +279,7 @@ def main() -> int:
 
     results = collect_smoke_results(
         skip_doctor=args.skip_doctor,
+        skip_integrity=args.skip_integrity,
         verbose=args.verbose,
     )
 
