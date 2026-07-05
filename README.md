@@ -43,6 +43,9 @@
 * repair gold из уже готового silver JSON;
 * диагностика окружения через `pipeline.py doctor`;
 * read-only статус локального хранилища;
+* проверка целостности файлового хранилища;
+* анализ зависших `processing` jobs;
+* безопасная диагностика и очистка локальных технических артефактов;
 * smoke tests для разработки;
 * локальный backup скриптов перед ручными правками.
 
@@ -229,6 +232,19 @@ python scripts\pipeline.py status --json
 python scripts\pipeline.py doctor
 ```
 
+`doctor` проверяет:
+
+* структуру папок;
+* доступ на запись;
+* локальный конфиг;
+* `.env`;
+* `ffmpeg`;
+* `whisperx`;
+* HF token при включённой diarization;
+* синтаксис основных Python-скриптов;
+* краткую storage integrity summary;
+* краткую orphaned processing summary.
+
 Подробный вывод:
 
 ```bat
@@ -301,6 +317,152 @@ python scripts\pipeline.py ...
 
 ---
 
+## Диагностические и maintenance-инструменты
+
+### Проверка целостности хранилища
+
+```bat
+python scripts\check_storage_integrity.py
+```
+
+Подробно:
+
+```bat
+python scripts\check_storage_integrity.py --verbose
+```
+
+JSON:
+
+```bat
+python scripts\check_storage_integrity.py --json
+```
+
+Strict mode:
+
+```bat
+python scripts\check_storage_integrity.py --strict
+```
+
+Скрипт ничего не удаляет и не исправляет. Он только проверяет файловый контракт:
+
+* неполные gold-result папки;
+* невалидные JSON;
+* `silver/asr_json` без связанного gold;
+* failed jobs без `job_context.json`;
+* retry markers;
+* `CLEANUP_FAILED.txt`;
+* старые processing job;
+* bronze originals без связи с известными job.
+
+---
+
+### Анализ зависших processing job
+
+```bat
+python scripts\recover_orphaned_processing.py
+```
+
+Подробно:
+
+```bat
+python scripts\recover_orphaned_processing.py --verbose
+```
+
+JSON:
+
+```bat
+python scripts\recover_orphaned_processing.py --json
+```
+
+Показать свежие processing job:
+
+```bat
+python scripts\recover_orphaned_processing.py --include-recent --verbose
+```
+
+Проверить конкретный job:
+
+```bat
+python scripts\recover_orphaned_processing.py --job-id <job_id> --verbose
+```
+
+Скрипт ничего не удаляет, не перемещает и не чинит. Он только классифицирует зависшие `data/processing/<job_id>` и предлагает безопасное следующее действие.
+
+---
+
+### Диагностика и безопасная очистка старых технических артефактов
+
+Диагностический режим:
+
+```bat
+python scripts\cleanup_old_jobs.py --verbose
+```
+
+JSON:
+
+```bat
+python scripts\cleanup_old_jobs.py --json
+```
+
+Показать только safe-кандидатов:
+
+```bat
+python scripts\cleanup_old_jobs.py --level safe --verbose
+```
+
+Показать только caution-кандидатов:
+
+```bat
+python scripts\cleanup_old_jobs.py --level caution --verbose
+```
+
+Показать локальные backup:
+
+```bat
+python scripts\cleanup_old_jobs.py --category local_backups --include-young-backups --verbose
+```
+
+SAFE-категории, которые можно удалять через явные флаги:
+
+```text
+pycache
+backup_files
+local_backups
+logs
+```
+
+План удаления без удаления:
+
+```bat
+python scripts\cleanup_old_jobs.py --delete-pycache
+```
+
+Реальное удаление требует `--yes`:
+
+```bat
+python scripts\cleanup_old_jobs.py --delete-pycache --yes
+```
+
+Другие safe-delete команды:
+
+```bat
+python scripts\cleanup_old_jobs.py --delete-backup-files-older-than-days 0 --yes
+python scripts\cleanup_old_jobs.py --delete-local-backups-older-than-days 14 --yes
+python scripts\cleanup_old_jobs.py --delete-logs-older-than-days 14 --yes
+```
+
+CAUTION-категории только подсвечиваются и не удаляются этим инструментом:
+
+```text
+retried_failed
+old_processing
+processing_cleanup_failed
+```
+
+`bronze`, `silver` и `gold` этим инструментом не удаляются.
+
+---
+
 ## Dev-инструменты
 
 ### Smoke tests
@@ -317,6 +479,12 @@ python tests\smoke_tests.py
 python tests\smoke_tests.py --skip-doctor
 ```
 
+Если нужно временно пропустить storage integrity:
+
+```bat
+python tests\smoke_tests.py --skip-integrity
+```
+
 JSON-вывод:
 
 ```bat
@@ -330,6 +498,7 @@ Smoke tests не запускают реальную транскрибацию.
 * `pipeline.py init`;
 * `pipeline.py status --json`;
 * `pipeline.py process --dry-run --show-sizes`;
+* `check_storage_integrity.py`;
 * опционально `pipeline.py doctor`.
 
 ---
@@ -388,6 +557,9 @@ C:\whisperx_ru
 │   ├── status_jobs.py
 │   ├── retry_failed_job.py
 │   ├── repair_gold_from_json.py
+│   ├── check_storage_integrity.py
+│   ├── recover_orphaned_processing.py
+│   ├── cleanup_old_jobs.py
 │   ├── format_whisperx_json.py
 │   ├── project_paths.py
 │   └── init_dirs.py
@@ -401,6 +573,7 @@ C:\whisperx_ru
 ├── docs
 │   └── PIPELINE_DETAILS.md
 ├── hf_cache
+├── .local_backups
 ├── .env.example
 ├── .env
 ├── .gitignore
@@ -529,14 +702,11 @@ findstr /s /n /i "C:\\whisperx_ru C:/whisperx_ru hf_ token secret HUGGINGFACE PY
 
 Ближайшие шаги:
 
-1. `check_storage_integrity.py` — проверка целостности файлового хранилища;
-2. интеграция краткой integrity-сводки в `pipeline.py doctor`;
-3. `recover_orphaned_processing.py` — безопасное восстановление orphaned processing;
-4. `cleanup_old_jobs.py` — безопасная очистка временных/старых данных через dry-run;
-5. GitHub Actions для `tests/smoke_tests.py --skip-doctor`;
-6. `jobs.db` как индекс для будущего UI;
-7. UI/API слой;
-8. Airflow как оркестратор уже готовых CLI-команд.
+1. GitHub Actions для `tests/smoke_tests.py --skip-doctor`;
+2. `jobs.db` как индекс для будущего UI;
+3. подготовка LLM-input слоя;
+4. UI/API слой;
+5. Airflow как оркестратор уже готовых CLI-команд.
 
 Принцип развития:
 
@@ -544,5 +714,5 @@ findstr /s /n /i "C:\\whisperx_ru C:/whisperx_ru hf_ token secret HUGGINGFACE PY
 Не добавлять новые обязательные ручные шаги.
 Добавлять внутренние инструменты.
 Оборачивать их в единый CLI или будущий UI.
-Сначала устойчивость и наблюдаемость, потом DB/UI/Airflow.
+Сначала устойчивость и наблюдаемость, потом jobs.db/UI/Airflow.
 ```
