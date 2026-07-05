@@ -27,6 +27,11 @@ IGNORED_SUFFIXES = {
     ".done", ".uploading", ".part", ".tmp", ".crdownload",
 }
 
+INTERNAL_LANDING_FILENAMES = {
+    ".gitkeep",
+    ".gitignore",
+}
+
 
 def now() -> datetime:
     return datetime.now()
@@ -170,6 +175,10 @@ def is_candidate_landing_file(path: Path) -> bool:
     return True
 
 
+def is_internal_landing_file(path: Path) -> bool:
+    return path.name.lower() in INTERNAL_LANDING_FILENAMES
+
+
 def collect_landing(include_sizes: bool) -> list[dict]:
     items = []
 
@@ -178,6 +187,9 @@ def collect_landing(include_sizes: bool) -> list[dict]:
 
     for path in LANDING_DIR.iterdir():
         if not path.is_file():
+            continue
+
+        if is_internal_landing_file(path):
             continue
 
         status = "ready" if is_candidate_landing_file(path) else "ignored"

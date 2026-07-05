@@ -680,7 +680,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Единая точка входа для локального WhisperX meeting pipeline."
+        description=(
+            "Единая точка входа для локального WhisperX meeting pipeline. "
+            "Обычная эксплуатация: process, status, repair, doctor, init."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     subparsers = parser.add_subparsers(
@@ -691,45 +695,143 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser = subparsers.add_parser(
         "process",
         help="Обработать один файл или все готовые файлы из landing.",
+        description=(
+            "Обработка входных файлов. Если указан --input, обрабатывается один файл. "
+            "Если --input не указан, запускается batch-обработка всех готовых файлов из data/landing."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     process_parser.add_argument(
         "--input",
         default=None,
-        help="Путь к одному входному файлу. Если не указан, обрабатывается landing batch.",
+        help=(
+            "Путь к одному входному аудио/видео файлу. "
+            "Обычно используется файл из data/landing. "
+            "Если параметр не указан, будет обработан landing batch."
+        ),
     )
-    process_parser.add_argument("--dry-run", action="store_true")
-    process_parser.add_argument("--show-sizes", action="store_true")
-    process_parser.add_argument("--limit", type=int, default=None)
-    process_parser.add_argument("--newest-first", action="store_true")
-    process_parser.add_argument("--continue-on-error", action="store_true")
-    process_parser.add_argument("--keep-processing", action="store_true")
+    process_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только показать, какие файлы были бы обработаны. Работает только для batch-режима без --input.",
+    )
+    process_parser.add_argument(
+        "--show-sizes",
+        action="store_true",
+        help="Показать размеры файлов в списке batch-обработки.",
+    )
+    process_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Обработать максимум N файлов из landing.",
+    )
+    process_parser.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="Обрабатывать сначала самые новые файлы. По умолчанию сначала самые старые.",
+    )
+    process_parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Не останавливаться на первой ошибке и продолжать следующие файлы.",
+    )
+    process_parser.add_argument(
+        "--keep-processing",
+        action="store_true",
+        help="Не удалять data/processing/<job_id> после success. Полезно для отладки.",
+    )
     process_parser.set_defaults(func=cmd_process)
 
     status_parser = subparsers.add_parser(
         "status",
         help="Показать состояние локального хранилища.",
+        description=(
+            "Read-only аудит текущего состояния landing, processing, failed и gold. "
+            "Команда ничего не меняет и ничего не удаляет."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    status_parser.add_argument("--limit", type=int, default=None)
-    status_parser.add_argument("--sizes", action="store_true")
-    status_parser.add_argument("--orphan-hours", type=int, default=None)
-    status_parser.add_argument("--json", action="store_true")
-    status_parser.add_argument("--landing", "--landing-only", dest="landing", action="store_true")
-    status_parser.add_argument("--processing", "--processing-only", dest="processing", action="store_true")
-    status_parser.add_argument("--failed", "--failed-only", dest="failed", action="store_true")
-    status_parser.add_argument("--gold", "--gold-only", dest="gold", action="store_true")
+    status_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Сколько элементов показывать в каждой секции.",
+    )
+    status_parser.add_argument(
+        "--sizes",
+        action="store_true",
+        help="Посчитать размеры файлов/папок. Может быть медленнее на больших архивах.",
+    )
+    status_parser.add_argument(
+        "--orphan-hours",
+        type=int,
+        default=None,
+        help="Через сколько часов processing job считать кандидатом в orphan.",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Вывести полный отчёт в JSON для будущего UI/API или автоматизации.",
+    )
+    status_parser.add_argument(
+        "--landing",
+        "--landing-only",
+        dest="landing",
+        action="store_true",
+        help="Показать только landing.",
+    )
+    status_parser.add_argument(
+        "--processing",
+        "--processing-only",
+        dest="processing",
+        action="store_true",
+        help="Показать только processing.",
+    )
+    status_parser.add_argument(
+        "--failed",
+        "--failed-only",
+        dest="failed",
+        action="store_true",
+        help="Показать только failed jobs.",
+    )
+    status_parser.add_argument(
+        "--gold",
+        "--gold-only",
+        dest="gold",
+        action="store_true",
+        help="Показать только успешные gold results.",
+    )
     status_parser.set_defaults(func=cmd_status)
 
     repair_parser = subparsers.add_parser(
         "repair",
         help="Автоматически восстановить failed job через silver JSON или bronze.",
+        description=(
+            "Умное восстановление failed job. В mode=auto сначала проверяется silver/asr_json. "
+            "Если JSON уже есть, выполняется быстрый repair gold без повторного WhisperX. "
+            "Если JSON нет, но есть bronze/raw_original, выполняется полный retry от bronze."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    repair_parser.add_argument("--job-id", default=None)
-    repair_parser.add_argument("--failed-dir", default=None)
+    repair_parser.add_argument(
+        "--job-id",
+        default=None,
+        help="ID failed job из data/failed/<job_id>.",
+    )
+    repair_parser.add_argument(
+        "--failed-dir",
+        default=None,
+        help="Прямой путь к папке failed job. Альтернатива --job-id.",
+    )
     repair_parser.add_argument(
         "--mode",
         choices=["auto", "silver", "bronze"],
         default="auto",
-        help="auto: сначала silver/asr_json, потом bronze. Можно принудительно выбрать silver или bronze.",
+        help=(
+            "Стратегия восстановления. auto: сначала silver/asr_json, потом bronze. "
+            "silver: принудительно repair из JSON. bronze: принудительно полный retry от исходника."
+        ),
     )
     repair_parser.add_argument(
         "--dry-run",
@@ -739,26 +841,42 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser.add_argument(
         "--keep-processing",
         action="store_true",
-        help="Для bronze retry: сохранить processing после success.",
+        help="Для bronze retry: сохранить processing после успешной обработки.",
     )
     repair_parser.add_argument(
         "--no-mark-retried",
         action="store_true",
-        help="Для silver repair: не создавать RETRIED_SUCCESSFULLY.json.",
+        help="Для silver repair: не создавать RETRIED_SUCCESSFULLY.json в failed job.",
     )
     repair_parser.set_defaults(func=cmd_repair)
 
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Проверить готовность локальной установки и базовые системные риски.",
+        description=(
+            "Диагностика окружения и структуры проекта: папки, доступ на запись, "
+            "config, .env, ffmpeg, whisperx, HF token при включённой diarization, "
+            "синтаксис основных Python-скриптов."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    doctor_parser.add_argument("--json", action="store_true")
-    doctor_parser.add_argument("--verbose", action="store_true")
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Вывести результат диагностики в JSON.",
+    )
+    doctor_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Показывать не только WARN/ERROR, но и успешные OK-проверки.",
+    )
     doctor_parser.set_defaults(func=cmd_doctor)
 
     init_parser = subparsers.add_parser(
         "init",
         help="Создать локальную структуру папок.",
+        description="Создаёт data/*, hf_cache и .gitkeep после clone или переноса проекта.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     init_parser.set_defaults(func=cmd_init)
 
