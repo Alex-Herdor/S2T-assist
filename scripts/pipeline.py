@@ -38,6 +38,7 @@ PROCESS_LANDING_ONCE_SCRIPT = SCRIPT_DIR / "process_landing_once.py"
 STATUS_JOBS_SCRIPT = SCRIPT_DIR / "status_jobs.py"
 RETRY_FAILED_JOB_SCRIPT = SCRIPT_DIR / "retry_failed_job.py"
 REPAIR_GOLD_FROM_JSON_SCRIPT = SCRIPT_DIR / "repair_gold_from_json.py"
+CHECK_STORAGE_INTEGRITY_SCRIPT = SCRIPT_DIR / "check_storage_integrity.py"
 INIT_DIRS_SCRIPT = SCRIPT_DIR / "init_dirs.py"
 
 IMPORTANT_SCRIPTS = [
@@ -48,6 +49,7 @@ IMPORTANT_SCRIPTS = [
     SCRIPT_DIR / "status_jobs.py",
     SCRIPT_DIR / "retry_failed_job.py",
     SCRIPT_DIR / "repair_gold_from_json.py",
+    SCRIPT_DIR / "check_storage_integrity.py",
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
 ]
@@ -482,6 +484,87 @@ def check_py_compile(results: list[CheckResult], script_path: Path) -> None:
         )
 
 
+def check_storage_integrity_summary(
+    results: list[CheckResult],
+    verbose: bool = False,
+) -> None:
+    try:
+        from check_storage_integrity import (
+            collect_all_issues,
+            indexes_to_summary,
+            summarize_issues,
+        )
+    except Exception as exc:
+        add_result(
+            results,
+            "error",
+            "storage_integrity:import",
+            "Не удалось импортировать check_storage_integrity.py.",
+            details=str(exc),
+        )
+        return
+
+    try:
+        issues, indexes = collect_all_issues(
+            orphan_hours=6.0,
+            verbose=False,
+        )
+
+        issue_summary = summarize_issues(issues)
+        storage_summary = indexes_to_summary(indexes)
+
+    except Exception as exc:
+        add_result(
+            results,
+            "error",
+            "storage_integrity:run",
+            "Не удалось выполнить проверку файлового хранилища.",
+            details=str(exc),
+        )
+        return
+
+    details = (
+        f"issues: ok={issue_summary['ok']} "
+        f"warn={issue_summary['warn']} "
+        f"error={issue_summary['error']}; "
+        f"storage: gold={storage_summary['gold_jobs']} "
+        f"failed={storage_summary['failed_jobs']} "
+        f"retried_failed={storage_summary['retried_failed_jobs']} "
+        f"processing={storage_summary['processing_jobs']} "
+        f"silver_json={storage_summary['silver_json_jobs']} "
+        f"bronze={storage_summary['bronze_original_jobs']}; "
+        "details: python scripts\\check_storage_integrity.py"
+    )
+
+    if issue_summary["error"] > 0:
+        add_result(
+            results,
+            "error",
+            "storage_integrity",
+            "В файловом хранилище найдены ERROR-нарушения контракта.",
+            details=details,
+        )
+        return
+
+    if issue_summary["warn"] > 0:
+        add_result(
+            results,
+            "warn",
+            "storage_integrity",
+            "В файловом хранилище найдены WARN-предупреждения.",
+            details=details,
+        )
+        return
+
+    add_result(
+        results,
+        "ok",
+        "storage_integrity",
+        "Файловое хранилище выглядит целым.",
+        details=details if verbose else None,
+    )
+
+
 def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
     load_dotenv_if_exists()
 
@@ -592,6 +675,11 @@ def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
 
     for script_path in IMPORTANT_SCRIPTS:
         check_py_compile(results, script_path)
+
+    check_storage_integrity_summary(
+        results=results,
+        verbose=verbose,
+    )
 
     return results
 
@@ -856,7 +944,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Диагностика окружения и структуры проекта: папки, доступ на запись, "
             "config, .env, ffmpeg, whisperx, HF token при включённой diarization, "
-            "синтаксис основных Python-скриптов."
+            "синтаксис основных Python-скриптов и краткая storage integrity summary."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
