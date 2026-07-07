@@ -226,6 +226,26 @@ Pipeline обрабатывает только финальные имена и 
 
 Автоматическая обработка сделана через Windows Task Scheduler.
 
+В Git хранится только безопасный шаблон:
+
+```bat
+scripts\run_pipeline_worker.bat.example
+```
+
+Локальный рабочий файл создаётся из шаблона:
+
+```bat
+scripts\run_pipeline_worker.bat
+```
+
+Локальный `.bat` не коммитится, потому что содержит машинно-специфичные пути:
+
+```text
+путь к проекту
+путь к conda.bat
+имя conda env
+```
+
 Схема:
 
 ```text
@@ -234,16 +254,32 @@ Task Scheduler
 → conda activate whisperx-ru
 → python scripts/pipeline.py process
 → максимум один ready-файл
+→ python scripts/pipeline.py jobs rebuild
+→ обновлённый data/jobs.db
 ```
 
 Worker-bat отвечает за:
 
-* переход в `C:\whisperx_ru`;
+* переход в локальную папку проекта;
 * логирование в `logs/pipeline_worker.log`;
 * lock в `data/.locks`;
 * активацию conda env;
 * запуск `pipeline.py process`;
+* пересборку `jobs.db` после каждого запуска;
 * возврат exit code.
+
+Логика exit code:
+
+```text
+process failed
+  → return process exit code
+
+process ok, jobs rebuild failed
+  → return jobs rebuild exit code
+
+process ok, jobs rebuild ok
+  → return 0
+```
 
 Рекомендуемые настройки Task Scheduler:
 
@@ -570,6 +606,16 @@ jobs.db:
 python scripts\pipeline.py jobs rebuild
 python scripts\pipeline.py jobs rebuild --dry-run
 ```
+
+В обычной эксплуатации `jobs.db` обновляется автоматически после каждого запуска worker-а:
+
+```text
+run_pipeline_worker.bat
+→ pipeline.py process
+→ pipeline.py jobs rebuild
+```
+
+Ручная пересборка нужна для диагностики, восстановления или после ручных изменений в файловой структуре.
 
 Просмотр:
 

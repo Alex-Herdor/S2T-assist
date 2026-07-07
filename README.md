@@ -247,20 +247,42 @@ Pipeline игнорирует:
 
 Автоматический запуск сделан через Windows Task Scheduler.
 
-Точка входа:
+В Git хранится только безопасный шаблон:
+
+```bat
+scripts\run_pipeline_worker.bat.example
+```
+
+Локальный рабочий файл создаётся из шаблона и не коммитится:
 
 ```bat
 scripts\run_pipeline_worker.bat
 ```
 
+`run_pipeline_worker.bat` не попадает в Git, потому что содержит локальные пути к проекту и conda.
+
 Worker:
 
-* переходит в `C:\whisperx_ru`;
+* переходит в локальную папку проекта;
 * пишет лог в `logs\pipeline_worker.log`;
 * ставит lock в `data\.locks`;
 * активирует conda-окружение `whisperx-ru`;
 * запускает `python scripts\pipeline.py process`;
+* после каждого запуска пересобирает `data\jobs.db`;
 * возвращает понятный exit code.
+
+Логика exit code:
+
+```text
+process упал
+  → worker возвращает код process
+
+process успешен, jobs rebuild упал
+  → worker возвращает код jobs rebuild
+
+process успешен, jobs rebuild успешен
+  → worker возвращает 0
+```
 
 Рекомендуемые настройки задачи:
 
@@ -664,7 +686,7 @@ C:\whisperx_ru
 │   └── pipeline_worker.log
 ├── scripts
 │   ├── pipeline.py
-│   ├── run_pipeline_worker.bat
+│   ├── run_pipeline_worker.bat.example
 │   ├── run_whisperx.py
 │   ├── process_one_file.py
 │   ├── process_landing_once.py
