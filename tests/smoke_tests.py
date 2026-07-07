@@ -27,6 +27,8 @@ SCRIPTS_TO_COMPILE = [
     CHECK_STORAGE_INTEGRITY_SCRIPT,
     SCRIPT_DIR / "recover_orphaned_processing.py",
     SCRIPT_DIR / "cleanup_old_jobs.py",
+    SCRIPT_DIR / "rebuild_jobs_db.py",
+    SCRIPT_DIR / "jobs_db_status.py",
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
 ]
@@ -38,6 +40,9 @@ PIPELINE_HELP_COMMANDS = [
     [sys.executable, str(PIPELINE_SCRIPT), "repair", "--help"],
     [sys.executable, str(PIPELINE_SCRIPT), "doctor", "--help"],
     [sys.executable, str(PIPELINE_SCRIPT), "init", "--help"],
+    [sys.executable, str(PIPELINE_SCRIPT), "jobs", "--help"],
+    [sys.executable, str(PIPELINE_SCRIPT), "jobs", "rebuild", "--help"],
+    [sys.executable, str(PIPELINE_SCRIPT), "jobs", "status", "--help"],
 ]
 
 

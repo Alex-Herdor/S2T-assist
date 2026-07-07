@@ -2,7 +2,7 @@
 
 Локальный пайплайн для обработки аудио/видео записей рабочих встреч через WhisperX на Windows 11.
 
-Цель проекта — принимать записи встреч, локально обрабатывать их через WhisperX, сохранять технический JSON и готовить данные для дальнейшей постобработки, UI и автоматизации.
+Цель проекта — принимать записи встреч, локально обрабатывать их через WhisperX, сохранять технический ASR JSON и готовить основу для дальнейшей постобработки, UI/API и LLM-summary слоя.
 
 Проект рассчитан на локальный запуск на mini-PC без облачной обработки.
 
@@ -12,27 +12,38 @@
 
 ## Текущее состояние MVP
 
-Сейчас реализован локальный файловый пайплайн:
+Сейчас реализован локальный semi-automated pipeline:
 
-1. файл вручную кладётся в `data/landing`;
-2. запускается единая CLI-команда;
-3. файл переносится в `data/bronze/raw_original`;
-4. создаётся рабочий WAV в `data/processing`;
-5. создаётся FLAC-архив в `data/silver/audio_flac`;
-6. запускается WhisperX;
-7. raw WhisperX JSON сохраняется в `data/silver/asr_json`;
-8. итоговый gold-result сохраняется в `data/gold/transcripts`;
-9. временная processing-папка удаляется после успешной обработки;
-10. при ошибке создаётся diagnostic snapshot в `data/failed`.
+1. файл загружается в `data/landing` вручную или через SFTP;
+2. для SFTP/upload используется безопасный паттерн `*.uploading → final filename`;
+3. Windows Task Scheduler периодически запускает `scripts/run_pipeline_worker.bat`;
+4. worker активирует conda-окружение `whisperx-ru`;
+5. worker вызывает `python scripts/pipeline.py process`;
+6. `pipeline.py process` выбирает максимум один готовый файл из `data/landing`;
+7. временные и недогруженные файлы игнорируются;
+8. перед обработкой проверяется стабильность файла;
+9. исходник переносится в `data/bronze/raw_original`;
+10. создаётся рабочий WAV в `data/processing`;
+11. создаётся FLAC-архив в `data/silver/audio_flac`;
+12. запускается WhisperX;
+13. raw WhisperX JSON сохраняется в `data/silver/asr_json`;
+14. итоговый gold-result сохраняется в `data/gold/transcripts`;
+15. временная processing-папка удаляется после успешной обработки;
+16. при ошибке создаётся diagnostic snapshot в `data/failed`;
+17. `data/jobs.db` можно пересобрать из файлов и использовать для быстрого просмотра jobs.
 
 ---
 
 ## Что входит в MVP
 
 * локальная обработка аудио/видео файлов;
+* SFTP/upload в `data/landing`;
+* безопасная файловая готовность через `.uploading → final filename`;
+* автоматический запуск через Windows Task Scheduler;
+* worker-bat для запуска pipeline;
+* one-file processing mode для безопасной работы по расписанию;
 * единая пользовательская точка входа `scripts/pipeline.py`;
-* ручная batch-обработка файлов из `data/landing`;
-* обработка одного конкретного файла;
+* обработка одного конкретного файла через `--input`;
 * сохранение исходника в `bronze`;
 * создание рабочего WAV;
 * создание архивного FLAC;
@@ -46,7 +57,10 @@
 * проверка целостности файлового хранилища;
 * анализ зависших `processing` jobs;
 * безопасная диагностика и очистка локальных технических артефактов;
+* восстановимый SQLite-индекс `data/jobs.db`;
+* просмотр jobs через `pipeline.py jobs status`;
 * smoke tests для разработки;
+* GitHub Actions smoke CI;
 * локальный backup скриптов перед ручными правками.
 
 ---
@@ -55,8 +69,6 @@
 
 * Airflow;
 * веб-интерфейс;
-* сетевой upload;
-* SFTP-интеграция;
 * MinIO/S3;
 * Cloudflare Tunnel / VPS relay;
 * VTT;
@@ -64,10 +76,9 @@
 * сложный speaker remapping;
 * оптимизация diarization;
 * облачная обработка;
-* jobs.db;
-* LLM-summary слой.
+* полноценный LLM-summary слой.
 
-Эти части могут быть добавлены позже, когда локальный файловый пайплайн станет достаточно устойчивым.
+Эти части могут быть добавлены позже, когда локальный файловый слой, jobs-index и CLI/API-контракты будут достаточно устойчивыми.
 
 ---
 
@@ -122,22 +133,28 @@ python scripts\pipeline.py doctor
 data\landing
 ```
 
-Проверить, какие файлы будут обработаны:
-
-```bat
-python scripts\pipeline.py process --dry-run --show-sizes
-```
-
-Запустить обработку landing:
+Запустить обработку одного готового файла из landing:
 
 ```bat
 python scripts\pipeline.py process
 ```
 
-Проверить состояние хранилища:
+Проверить состояние файлового хранилища:
 
 ```bat
 python scripts\pipeline.py status
+```
+
+Пересобрать jobs index:
+
+```bat
+python scripts\pipeline.py jobs rebuild
+```
+
+Посмотреть jobs:
+
+```bat
+python scripts\pipeline.py jobs status
 ```
 
 ---
@@ -158,41 +175,42 @@ python scripts\pipeline.py status
 python scripts\pipeline.py repair --job-id <failed_job_id>
 python scripts\pipeline.py doctor
 python scripts\pipeline.py init
+python scripts\pipeline.py jobs rebuild
+python scripts\pipeline.py jobs status
 ```
 
-`pipeline.py` — это тонкий façade над существующими скриптами. Он не заменяет инженерные инструменты, а даёт единый вход для обычной эксплуатации и будущего UI/API.
+`pipeline.py` — это тонкий façade над существующими скриптами. Он не заменяет инженерные инструменты, а даёт единый вход для обычной эксплуатации, worker-а и будущего UI/API.
 
 ---
 
-## Основные команды
+## Обработка файлов
 
-### Обработка всех готовых файлов из landing
+### Автоматическая обработка landing
+
+Обычный режим:
 
 ```bat
 python scripts\pipeline.py process
 ```
 
-Dry-run:
+Команда выбирает максимум один готовый файл из:
 
-```bat
-python scripts\pipeline.py process --dry-run --show-sizes
+```text
+data\landing
 ```
 
-Ограничить количество файлов:
+Если файлов нет, это штатная ситуация:
 
-```bat
-python scripts\pipeline.py process --limit 2
+```text
+[process] no files found in landing
+exit code: 0
 ```
 
-Продолжать после ошибки:
-
-```bat
-python scripts\pipeline.py process --continue-on-error
-```
+Один запуск `process` обрабатывает максимум один файл. Следующий файл будет подхвачен следующим запуском worker-а или ручным повторным запуском команды.
 
 ---
 
-### Обработка одного файла
+### Обработка конкретного файла
 
 ```bat
 python scripts\pipeline.py process --input data\landing\meeting.m4a
@@ -200,7 +218,76 @@ python scripts\pipeline.py process --input data\landing\meeting.m4a
 
 ---
 
-### Проверка статуса
+### Файловая готовность
+
+Для загрузки через SFTP/upload используется паттерн:
+
+```text
+meeting.m4a.uploading
+→ meeting.m4a
+```
+
+Pipeline игнорирует:
+
+```text
+.uploading
+.tmp
+.part
+.crdownload
+.done
+.gitignore
+.gitkeep
+```
+
+Перед запуском обработки проверяется, что файл достаточно старый и не меняется во время короткой stability probe.
+
+---
+
+## Windows Task Scheduler Worker
+
+Автоматический запуск сделан через Windows Task Scheduler.
+
+Точка входа:
+
+```bat
+scripts\run_pipeline_worker.bat
+```
+
+Worker:
+
+* переходит в `C:\whisperx_ru`;
+* пишет лог в `logs\pipeline_worker.log`;
+* ставит lock в `data\.locks`;
+* активирует conda-окружение `whisperx-ru`;
+* запускает `python scripts\pipeline.py process`;
+* возвращает понятный exit code.
+
+Рекомендуемые настройки задачи:
+
+```text
+Repeat every: 5 minutes
+If the task is already running: Do not start a new instance
+Stop the task if it runs longer than: 12 hours
+Run task as soon as possible after a scheduled start is missed
+```
+
+На время ручных правок скриптов задачу лучше отключать:
+
+```bat
+schtasks /Change /TN "WhisperX Pipeline Worker" /Disable
+```
+
+После проверки включить обратно:
+
+```bat
+schtasks /Change /TN "WhisperX Pipeline Worker" /Enable
+```
+
+---
+
+## Проверка статуса
+
+Файловый статус:
 
 ```bat
 python scripts\pipeline.py status
@@ -218,6 +305,12 @@ python scripts\pipeline.py status --landing
 python scripts\pipeline.py status --failed
 ```
 
+Только gold:
+
+```bat
+python scripts\pipeline.py status --gold
+```
+
 JSON-вывод:
 
 ```bat
@@ -226,7 +319,57 @@ python scripts\pipeline.py status --json
 
 ---
 
-### Диагностика
+## Jobs DB
+
+`data/jobs.db` — восстановимый SQLite-индекс поверх файловой структуры.
+
+Source of truth остаётся файловым:
+
+```text
+data/bronze
+data/processing
+data/silver
+data/gold
+data/failed
+job_context.json
+manifest.json
+```
+
+`jobs.db` нужен для быстрого просмотра jobs и будущего UI/API. Если база повреждена или удалена, её можно пересобрать из файлов.
+
+Пересобрать индекс:
+
+```bat
+python scripts\pipeline.py jobs rebuild
+```
+
+Dry-run:
+
+```bat
+python scripts\pipeline.py jobs rebuild --dry-run
+```
+
+Посмотреть jobs:
+
+```bat
+python scripts\pipeline.py jobs status
+python scripts\pipeline.py jobs status --details --limit 5
+python scripts\pipeline.py jobs status --status FAILED
+python scripts\pipeline.py jobs status --search meeting
+```
+
+Прямые скрипты остаются доступны:
+
+```bat
+python scripts\rebuild_jobs_db.py
+python scripts\jobs_db_status.py
+```
+
+`doctor` проверяет наличие и читаемость `jobs.db`. Отсутствие базы считается warning, а не error.
+
+---
+
+## Диагностика
 
 ```bat
 python scripts\pipeline.py doctor
@@ -243,6 +386,7 @@ python scripts\pipeline.py doctor
 * HF token при включённой diarization;
 * синтаксис основных Python-скриптов;
 * краткую storage integrity summary;
+* состояние `jobs.db`;
 * краткую orphaned processing summary.
 
 Подробный вывод:
@@ -259,7 +403,7 @@ python scripts\pipeline.py doctor --json
 
 ---
 
-### Восстановление failed job
+## Восстановление failed job
 
 Автоматически выбрать лучший способ восстановления:
 
@@ -305,6 +449,8 @@ scripts\retry_failed_job.py
 scripts\repair_gold_from_json.py
 scripts\run_whisperx.py
 scripts\init_dirs.py
+scripts\rebuild_jobs_db.py
+scripts\jobs_db_status.py
 ```
 
 Они нужны для отладки, диагностики и точечного восстановления.
@@ -343,16 +489,7 @@ Strict mode:
 python scripts\check_storage_integrity.py --strict
 ```
 
-Скрипт ничего не удаляет и не исправляет. Он только проверяет файловый контракт:
-
-* неполные gold-result папки;
-* невалидные JSON;
-* `silver/asr_json` без связанного gold;
-* failed jobs без `job_context.json`;
-* retry markers;
-* `CLEANUP_FAILED.txt`;
-* старые processing job;
-* bronze originals без связи с известными job.
+Скрипт ничего не удаляет и не исправляет.
 
 ---
 
@@ -374,19 +511,13 @@ JSON:
 python scripts\recover_orphaned_processing.py --json
 ```
 
-Показать свежие processing job:
-
-```bat
-python scripts\recover_orphaned_processing.py --include-recent --verbose
-```
-
 Проверить конкретный job:
 
 ```bat
 python scripts\recover_orphaned_processing.py --job-id <job_id> --verbose
 ```
 
-Скрипт ничего не удаляет, не перемещает и не чинит. Он только классифицирует зависшие `data/processing/<job_id>` и предлагает безопасное следующее действие.
+Скрипт ничего не удаляет, не перемещает и не чинит.
 
 ---
 
@@ -404,22 +535,16 @@ JSON:
 python scripts\cleanup_old_jobs.py --json
 ```
 
-Показать только safe-кандидатов:
+Показать safe-кандидатов:
 
 ```bat
 python scripts\cleanup_old_jobs.py --level safe --verbose
 ```
 
-Показать только caution-кандидатов:
+Показать caution-кандидатов:
 
 ```bat
 python scripts\cleanup_old_jobs.py --level caution --verbose
-```
-
-Показать локальные backup:
-
-```bat
-python scripts\cleanup_old_jobs.py --category local_backups --include-young-backups --verbose
 ```
 
 SAFE-категории, которые можно удалять через явные флаги:
@@ -431,32 +556,10 @@ local_backups
 logs
 ```
 
-План удаления без удаления:
-
-```bat
-python scripts\cleanup_old_jobs.py --delete-pycache
-```
-
 Реальное удаление требует `--yes`:
 
 ```bat
 python scripts\cleanup_old_jobs.py --delete-pycache --yes
-```
-
-Другие safe-delete команды:
-
-```bat
-python scripts\cleanup_old_jobs.py --delete-backup-files-older-than-days 0 --yes
-python scripts\cleanup_old_jobs.py --delete-local-backups-older-than-days 14 --yes
-python scripts\cleanup_old_jobs.py --delete-logs-older-than-days 14 --yes
-```
-
-CAUTION-категории только подсвечиваются и не удаляются этим инструментом:
-
-```text
-retried_failed
-old_processing
-processing_cleanup_failed
 ```
 
 `bronze`, `silver` и `gold` этим инструментом не удаляются.
@@ -466,8 +569,6 @@ processing_cleanup_failed
 ## Dev-инструменты
 
 ### Smoke tests
-
-Smoke tests находятся отдельно от эксплуатационного CLI:
 
 ```bat
 python tests\smoke_tests.py
@@ -485,16 +586,11 @@ python tests\smoke_tests.py --skip-doctor
 python tests\smoke_tests.py --skip-integrity
 ```
 
-JSON-вывод:
-
-```bat
-python tests\smoke_tests.py --json
-```
-
 Smoke tests не запускают реальную транскрибацию. Они проверяют:
 
 * `py_compile` основных скриптов;
 * help-команды `pipeline.py`;
+* help-команды `pipeline.py jobs`;
 * `pipeline.py init`;
 * `pipeline.py status --json`;
 * `pipeline.py process --dry-run --show-sizes`;
@@ -505,18 +601,10 @@ Smoke tests не запускают реальную транскрибацию.
 
 ### GitHub Actions
 
-В репозитории есть минимальный CI workflow:
+Минимальный CI workflow:
 
 ```text
 .github/workflows/smoke.yml
-```
-
-Он запускается на:
-
-```text
-push
-pull_request
-workflow_dispatch
 ```
 
 CI-команда:
@@ -525,7 +613,7 @@ CI-команда:
 python tests/smoke_tests.py --skip-doctor --skip-integrity
 ```
 
-В GitHub Actions intentionally не запускаются:
+В GitHub Actions не запускаются:
 
 ```text
 pipeline.py doctor
@@ -535,26 +623,7 @@ storage integrity check
 
 Причина: в CI нет локального Windows/conda окружения, WhisperX-моделей, ffmpeg, `.env`, Hugging Face cache и реальных файлов `data`.
 
-Назначение GitHub Actions на текущем этапе:
-
-```text
-поймать синтаксические ошибки
-поймать сломанный pipeline.py help
-поймать сломанный CLI contract
-проверить базовый smoke без локальных данных и моделей
-```
-
-Локально перед commit всё равно полезно запускать:
-
-```bat
-python tests\smoke_tests.py --skip-doctor
-```
-
-А полный локальный smoke, если окружение готово:
-
-```bat
-python tests\smoke_tests.py
-```
+---
 
 ### Локальный backup скриптов
 
@@ -562,18 +631,6 @@ python tests\smoke_tests.py
 
 ```bat
 python tools\backup_scripts.py --include-docs --label before_next_edit
-```
-
-Только список файлов:
-
-```bat
-python tools\backup_scripts.py --list
-```
-
-Dry-run:
-
-```bat
-python tools\backup_scripts.py --dry-run
 ```
 
 Backup складывается в:
@@ -601,9 +658,13 @@ C:\whisperx_ru
 │   ├── gold
 │   │   └── transcripts
 │   ├── failed
-│   └── archive
+│   ├── archive
+│   └── jobs.db
+├── logs
+│   └── pipeline_worker.log
 ├── scripts
 │   ├── pipeline.py
+│   ├── run_pipeline_worker.bat
 │   ├── run_whisperx.py
 │   ├── process_one_file.py
 │   ├── process_landing_once.py
@@ -613,6 +674,8 @@ C:\whisperx_ru
 │   ├── check_storage_integrity.py
 │   ├── recover_orphaned_processing.py
 │   ├── cleanup_old_jobs.py
+│   ├── rebuild_jobs_db.py
+│   ├── jobs_db_status.py
 │   ├── format_whisperx_json.py
 │   ├── project_paths.py
 │   └── init_dirs.py
@@ -620,152 +683,25 @@ C:\whisperx_ru
 │   └── smoke_tests.py
 ├── tools
 │   └── backup_scripts.py
-├── config
-│   ├── whisperx_config.example.json
-│   └── whisperx_config.json
 ├── docs
 │   └── PIPELINE_DETAILS.md
-├── hf_cache
-├── .local_backups
-├── .env.example
-├── .env
-├── .gitignore
-├── environment.yml
-└── README.md
+├── config
+│   └── whisperx_config.json
+└── hf_cache
 ```
 
 ---
 
-## Конфигурация
-
-Публичный пример конфига:
-
-```text
-config\whisperx_config.example.json
-```
-
-Локальный рабочий конфиг:
-
-```text
-config\whisperx_config.json
-```
-
-Локальный конфиг не коммитится.
-
-Пример:
-
-```json
-{
-  "language": "ru",
-  "model": "large-v3",
-  "device": "cpu",
-  "compute_type": "int8",
-  "batch_size": 4,
-  "threads": 16,
-  "align_model": "jonatasgrosman/wav2vec2-large-xlsr-53-russian",
-  "diarize": false,
-  "min_speakers": null,
-  "max_speakers": null,
-  "output_format": "json",
-  "vad_method": "silero",
-  "vad_onset": 0.3,
-  "vad_offset": 0.2,
-  "hf_cache_dir": "hf_cache"
-}
-```
-
----
-
-## Секреты
-
-Публичный пример:
-
-```text
-.env.example
-```
-
-Локальный файл:
-
-```text
-.env
-```
-
-Пример локального `.env`:
-
-```env
-HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-```
-
-`.env` не коммитится.
-
----
-
-## Что не попадает в Git
+## Важно про Git
 
 В Git не должны попадать:
 
 ```text
 .env
-config/whisperx_config.json
-data/landing/*
-data/bronze/raw_original/*
-data/processing/*
-data/silver/asr_json/*
-data/silver/audio_flac/*
-data/gold/transcripts/*
-data/failed/*
-hf_cache/*
-.local_backups/*
-backup*
-*.bak
-__pycache__
-```
-
-В Git попадают только `.gitkeep` для сохранения структуры папок.
-
----
-
-## Проверки перед commit
-
-```bat
-python tests\smoke_tests.py --skip-doctor
-git status --short --untracked-files=all
-git add --dry-run .
-```
-
-Sensitive check:
-
-```bat
-findstr /s /n /i "C:\\whisperx_ru C:/whisperx_ru hf_ token secret HUGGINGFACE PYANNOTE_AUTH retry_fail SYNTHETIC" scripts\*.py tests\*.py tools\*.py config\*.json *.md .env.example environment.yml
-```
-
-Нормально, если находятся только имена переменных, placeholder-строки и `hf_cache`.
-
-Ненормально, если находятся:
-
-* реальный `hf_...` token;
-* реальные имена встреч;
-* реальные job_id;
-* реальные JSON/FLAC/TXT результаты;
-* локальные абсолютные пути, зашитые в код.
-
----
-
-## Roadmap
-
-Ближайшие шаги:
-
-1. GitHub Actions для `tests/smoke_tests.py --skip-doctor`;
-2. `jobs.db` как индекс для будущего UI;
-3. подготовка LLM-input слоя;
-4. UI/API слой;
-5. Airflow как оркестратор уже готовых CLI-команд.
-
-Принцип развития:
-
-```text
-Не добавлять новые обязательные ручные шаги.
-Добавлять внутренние инструменты.
-Оборачивать их в единый CLI или будущий UI.
-Сначала устойчивость и наблюдаемость, потом jobs.db/UI/Airflow.
+data/jobs.db
+data/jobs.db-*
+logs/
+.local_backups/
+hf_cache/
+локальные audio/video данные
 ```

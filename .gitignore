@@ -118,3 +118,10 @@ test-results/
 # =========================
 
 .local_backups/
+
+# =========================
+# Local databases
+# =========================
+
+data/jobs.db
+data/jobs.db-*

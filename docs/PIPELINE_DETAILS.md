@@ -2,7 +2,7 @@
 
 Основной README находится в корне проекта: [`../README.md`](../README.md).
 
-Этот документ описывает внутреннюю структуру локального WhisperX meeting pipeline: зоны хранения, жизненный цикл job, recovery-модель, gold contract, диагностику, maintenance-инструменты и текущую архитектуру CLI.
+Этот документ описывает внутреннюю структуру локального WhisperX meeting pipeline: зоны хранения, жизненный цикл job, worker-flow, recovery-модель, gold contract, diagnostics, maintenance-инструменты, `jobs.db` и текущую архитектуру CLI.
 
 ---
 
@@ -10,16 +10,31 @@
 
 Проект строится вокруг локального файлового пайплайна.
 
-Сейчас не используются:
+Сейчас используются:
+
+* локальная файловая структура;
+* SFTP/upload в `data/landing`;
+* Windows Task Scheduler worker;
+* one-file processing mode;
+* восстановимый `data/jobs.db`;
+* GitHub Actions smoke CI.
+
+Пока не используются:
 
 * Airflow;
 * web UI;
-* SFTP upload;
 * MinIO/S3;
 * облачная обработка;
-* jobs.db.
+* полноценный LLM-summary слой.
 
-Сначала стабилизируется локальный MVP, затем поверх него можно добавлять оркестрацию, UI и автоматизацию.
+Ключевой принцип:
+
+```text
+сначала устойчивый локальный pipeline
+затем jobs.db как индекс
+затем API/UI
+затем Airflow/другая оркестрация при необходимости
+```
 
 ---
 
@@ -39,6 +54,8 @@ python scripts\pipeline.py status
 python scripts\pipeline.py repair --job-id <failed_job_id>
 python scripts\pipeline.py doctor
 python scripts\pipeline.py init
+python scripts\pipeline.py jobs rebuild
+python scripts\pipeline.py jobs status
 ```
 
 `pipeline.py` — это façade над существующими скриптами. Он нужен, чтобы обычная эксплуатация не требовала помнить множество отдельных команд.
@@ -51,17 +68,28 @@ python scripts\pipeline.py init
 Пользовательский / операционный слой:
   scripts/pipeline.py
 
+Автоматический запуск:
+  Windows Task Scheduler
+  scripts/run_pipeline_worker.bat
+
 Диагностический слой:
   pipeline.py doctor
   scripts/status_jobs.py
   scripts/check_storage_integrity.py
   scripts/recover_orphaned_processing.py
 
+Jobs index слой:
+  data/jobs.db
+  scripts/rebuild_jobs_db.py
+  scripts/jobs_db_status.py
+  pipeline.py jobs rebuild/status
+
 Maintenance слой:
   scripts/cleanup_old_jobs.py
 
 Dev / CI слой:
   tests/smoke_tests.py
+  .github/workflows/smoke.yml
 
 Локальный safety слой:
   tools/backup_scripts.py
@@ -75,22 +103,26 @@ Dev / CI слой:
   format_whisperx_json.py
 
 Будущий слой:
-  jobs.db
   API/UI
   Airflow
+  LLM-summary
 ```
 
 ---
 
 ## Что вызывает `pipeline.py`
 
-| Команда   | Назначение                                                | Что используется под капотом                       |
-| --------- | --------------------------------------------------------- | -------------------------------------------------- |
-| `process` | Обработка landing batch или одного файла                  | `process_landing_once.py` / `process_one_file.py`  |
-| `status`  | Read-only статус хранилища                                | `status_jobs.py`                                   |
-| `repair`  | Умное восстановление failed job                           | `repair_gold_from_json.py` / `retry_failed_job.py` |
-| `doctor`  | Диагностика окружения, storage integrity и orphan summary | встроенные проверки + diagnostic modules           |
-| `init`    | Создание локальных папок                                  | `init_dirs.py`                                     |
+| Команда | Назначение | Что используется под капотом |
+| --- | --- | --- |
+| `process` | Обработка одного `--input` или одного ready-файла из landing | `process_one_file.py` |
+| `status` | Read-only статус файлового хранилища | `status_jobs.py` |
+| `repair` | Умное восстановление failed job | `repair_gold_from_json.py` / `retry_failed_job.py` |
+| `doctor` | Диагностика окружения, storage integrity, jobs.db и orphan summary | встроенные проверки + diagnostic modules |
+| `init` | Создание локальных папок | `init_dirs.py` |
+| `jobs rebuild` | Пересборка `data/jobs.db` из файловой структуры | `rebuild_jobs_db.py` |
+| `jobs status` | Просмотр jobs из `data/jobs.db` | `jobs_db_status.py` |
+
+`process_landing_once.py` остаётся инженерным/legacy-инструментом, но обычный scheduler-flow теперь работает через one-file mode в `pipeline.py process`.
 
 ---
 
@@ -99,8 +131,8 @@ Dev / CI слой:
 ```text
 data/landing
   Входная зона.
-  Сюда вручную кладутся аудио/видео файлы.
-  В будущем сюда может писать upload/UI/SFTP.
+  Сюда вручную или через SFTP/upload кладутся аудио/видео файлы.
+  Здесь возможны временные файлы и недозагруженные файлы.
 
 data/bronze/raw_original
   Системное хранилище принятых исходников.
@@ -124,6 +156,12 @@ data/failed
 
 data/archive
   Резерв под будущие сценарии архивации.
+
+data/jobs.db
+  Восстановимый SQLite-индекс поверх файловой структуры.
+
+data/.locks
+  Lock-файлы для защиты автоматического worker-flow от параллельных запусков.
 
 hf_cache
   Локальный Hugging Face cache.
@@ -159,6 +197,67 @@ pipeline принимает файл и переносит его в bronze
 
 ---
 
+## Файловая готовность
+
+Для SFTP/upload используется паттерн:
+
+```text
+file.m4a.uploading
+→ file.m4a
+```
+
+Pipeline обрабатывает только финальные имена и игнорирует:
+
+```text
+.uploading
+.tmp
+.part
+.crdownload
+.done
+.gitignore
+.gitkeep
+```
+
+Перед запуском обработки `pipeline.py process` проверяет, что файл достаточно старый и не меняется во время короткого stability probe.
+
+---
+
+## Worker-flow
+
+Автоматическая обработка сделана через Windows Task Scheduler.
+
+Схема:
+
+```text
+Task Scheduler
+→ scripts/run_pipeline_worker.bat
+→ conda activate whisperx-ru
+→ python scripts/pipeline.py process
+→ максимум один ready-файл
+```
+
+Worker-bat отвечает за:
+
+* переход в `C:\whisperx_ru`;
+* логирование в `logs/pipeline_worker.log`;
+* lock в `data/.locks`;
+* активацию conda env;
+* запуск `pipeline.py process`;
+* возврат exit code.
+
+Рекомендуемые настройки Task Scheduler:
+
+```text
+Repeat every: 5 minutes
+If the task is already running: Do not start a new instance
+Stop the task if it runs longer than: 12 hours
+Run task as soon as possible after a scheduled start is missed
+```
+
+`pipeline.py process` возвращает `0`, если в `landing` нет готовых файлов. Это штатное состояние для scheduler-flow.
+
+---
+
 ## Успешный путь обработки
 
 ```text
@@ -176,11 +275,13 @@ data/landing/<original_file>
 
 После успешной обработки `data/processing/<job_id>` удаляется, если не указан режим `--keep-processing`.
 
+Если cleanup не удался, job всё равно может считаться успешным, но остаётся warning/marker для диагностики.
+
 ---
 
 ## Gold contract
 
-Gold-result сейчас хранит не человекочитаемые TXT/MD, а технический результат, готовый для следующего слоя обработки.
+Gold-result сейчас хранит технический результат, готовый для следующего слоя обработки.
 
 Структура:
 
@@ -436,11 +537,7 @@ python scripts\status_jobs.py
 
 ```bat
 python scripts\pipeline.py status --landing
-python scripts\pipeline`
-
-Поддерживаемые режимы:
-
-.py status --processing
+python scripts\pipeline.py status --processing
 python scripts\pipeline.py status --failed
 python scripts\pipeline.py status --gold
 python scripts\pipeline.py status --json
@@ -450,6 +547,79 @@ python scripts\pipeline.py status --sizes
 `status_jobs.py` не должен изменять файлы.
 
 Служебные файлы `.gitkeep` и `.gitignore` в landing не показываются.
+
+---
+
+## Jobs DB
+
+`data/jobs.db` используется как восстановимый индекс поверх файлового хранилища.
+
+Он не является source of truth.
+
+```text
+source of truth:
+  files + job_context.json + manifest.json
+
+jobs.db:
+  быстрый индекс для status/UI/API
+```
+
+Пересборка:
+
+```bat
+python scripts\pipeline.py jobs rebuild
+python scripts\pipeline.py jobs rebuild --dry-run
+```
+
+Просмотр:
+
+```bat
+python scripts\pipeline.py jobs status
+python scripts\pipeline.py jobs status --details --limit 5
+python scripts\pipeline.py jobs status --status FAILED
+python scripts\pipeline.py jobs status --search meeting
+```
+
+Прямые скрипты:
+
+```bat
+python scripts\rebuild_jobs_db.py
+python scripts\jobs_db_status.py
+```
+
+Минимальная таблица `jobs`:
+
+```text
+job_id
+original_filename
+status
+current_step
+source_mode
+attempt_type
+retry_of_job_id
+bronze_path
+silver_json_path
+gold_result_dir
+failed_dir
+processing_dir
+created_at
+updated_at
+error_message
+discovered_from
+```
+
+Приоритет статусов при merge:
+
+```text
+SUCCESS
+RETRIED_SUCCESSFULLY
+FAILED
+PROCESSING
+ASR_JSON_ONLY
+BRONZE_ONLY
+```
+
+Если `jobs.db` повреждён или удалён, его можно пересобрать из файлов.
 
 ---
 
@@ -474,6 +644,7 @@ python scripts\pipeline.py doctor
 * доступность `whisperx`;
 * `py_compile` основных Python-скриптов;
 * краткую storage integrity summary;
+* состояние `jobs.db`;
 * краткую orphaned processing summary.
 
 Подробный режим:
@@ -488,7 +659,7 @@ JSON-режим:
 python scripts\pipeline.py doctor --json
 ```
 
-`doctor` — эксплуатационная диагностика, поэтому он находится в `pipeline.py`.
+Отсутствие `jobs.db` считается warning, а не error.
 
 ---
 
@@ -588,21 +759,6 @@ orphan_failed_exists
 orphan_bronze_available
 orphan_no_recovery_source
 ```
-
-Скрипт показывает:
-
-* `job_id`;
-* возраст job;
-* `current_step`;
-* `failed_step`;
-* `original_filename`;
-* связь с `job_context.json`;
-* связь с bronze;
-* связь с silver JSON;
-* связь с gold;
-* связь с failed;
-* наличие `CLEANUP_FAILED.txt`;
-* suggestion.
 
 Скрипт ничего не удаляет, не перемещает и не чинит.
 
@@ -732,6 +888,7 @@ python tests\smoke_tests.py --skip-integrity
 
 * синтаксис основных скриптов;
 * help-команды `pipeline.py`;
+* help-команды `pipeline.py jobs`;
 * `pipeline.py init`;
 * `pipeline.py status --json`;
 * `pipeline.py process --dry-run --show-sizes`;
@@ -763,7 +920,8 @@ python tests/smoke_tests.py --skip-doctor --skip-integrity
 ```text
 py_compile основных скриптов
 pipeline.py --help
-pipeline.py process/status/repair/doctor/init --help
+pipeline.py process/status/repair/doctor/init/jobs --help
+pipeline.py jobs rebuild/status --help
 pipeline.py init
 pipeline.py status --json
 pipeline.py process --dry-run --show-sizes
@@ -778,6 +936,7 @@ Hugging Face token
 локальный whisperx_config.json
 реальное data-хранилище
 storage integrity реальных job
+jobs.db runtime state
 реальная транскрибация
 ```
 
@@ -789,6 +948,8 @@ storage integrity реальных job
 python tests\smoke_tests.py --skip-doctor
 python tests\smoke_tests.py
 ```
+
+---
 
 ## Локальный backup перед правками
 
@@ -826,26 +987,6 @@ Backup складывается в:
 
 ---
 
-## Файловая готовность
-
-Сейчас MVP запускается вручную и может обрабатывать конкретный файл или landing batch.
-
-В будущем для upload можно использовать один из подходов:
-
-```text
-file.uploading → rename to final filename
-```
-
-или:
-
-```text
-file.m4a + file.m4a.done
-```
-
-Пока это не реализовано как обязательный механизм.
-
----
-
 ## Cleanup behavior после обработки
 
 После успешной обработки processing-папка удаляется.
@@ -857,42 +998,6 @@ file.m4a + file.m4a.done
 * может остаться `CLEANUP_FAILED.txt`.
 
 Это не должно ломать результат обработки.
-
----
-
-## Будущий `jobs.db`
-
-`jobs.db` не должен заменять файловую структуру.
-
-Принцип:
-
-```text
-source of truth:
-  файлы + job_context.json + manifest.json
-
-jobs.db:
-  быстрый индекс для UI
-```
-
-Возможные поля:
-
-```text
-job_id
-original_filename
-status
-current_step
-source_mode
-attempt_type
-retry_of_job_id
-bronze_path
-silver_json_path
-gold_result_dir
-created_at
-updated_at
-error_message
-```
-
-Если база сломается, её можно будет восстановить из файлов.
 
 ---
 
@@ -915,7 +1020,7 @@ gold/transcripts/<result_dir>/whisperx_raw.json
 
 ## Будущий UI
 
-UI должен появиться после стабилизации файлового слоя и появления `jobs.db`.
+UI должен появиться после стабилизации файлового слоя и `jobs.db`.
 
 Минимальные функции UI:
 
@@ -942,7 +1047,7 @@ Airflow нужен позже как оркестратор, а не как хр
 
 ```text
 scan landing
-→ call process_one_file.py / pipeline process
+→ call pipeline.py process
 → report status
 ```
 
@@ -968,7 +1073,6 @@ job_id
 * MinIO/S3;
 * VPS;
 * Cloudflare Tunnel;
-* SFTP;
 * VTT;
 * веб-плеер;
 * сложный speaker remapping;
@@ -985,5 +1089,5 @@ job_id
 Инженерные скрипты должны быть доступны напрямую.
 Пользовательский слой должен оставаться простым.
 Будущий UI/API должен использовать те же контракты, что CLI.
-Сначала устойчивость и наблюдаемость, потом jobs.db/UI/Airflow.
+Сначала устойчивость и наблюдаемость, потом UI/API/Airflow.
 ```

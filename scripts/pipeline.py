@@ -7,9 +7,109 @@ import py_compile
 import shutil
 import subprocess
 import sys
+import time
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from datetime import datetime
+
+IGNORED_LANDING_SUFFIXES = (
+    ".uploading",
+    ".tmp",
+    ".part",
+    ".crdownload",
+    ".done",
+)
+
+IGNORED_LANDING_NAMES = {
+    ".gitignore",
+    ".gitkeep",
+}
+
+SUPPORTED_MEDIA_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+    ".wma",
+}
+
+def is_supported_landing_file(path: Path) -> bool:
+    name_lower = path.name.lower()
+
+    if not path.is_file():
+        return False
+
+    if path.name in IGNORED_LANDING_NAMES:
+        return False
+
+    if path.name.startswith("."):
+        return False
+
+    if any(name_lower.endswith(suffix) for suffix in IGNORED_LANDING_SUFFIXES):
+        return False
+
+    return path.suffix.lower() in SUPPORTED_MEDIA_EXTENSIONS
+
+
+def is_file_stable(path: Path, stable_seconds: int = 60, probe_seconds: int = 5) -> tuple[bool, str]:
+    try:
+        first_stat = path.stat()
+    except FileNotFoundError:
+        return False, "file disappeared before stat"
+
+    age_seconds = time.time() - first_stat.st_mtime
+    if age_seconds < stable_seconds:
+        return False, f"file is too new: age={age_seconds:.1f}s, required={stable_seconds}s"
+
+    time.sleep(probe_seconds)
+
+    try:
+        second_stat = path.stat()
+    except FileNotFoundError:
+        return False, "file disappeared during stability probe"
+
+    if first_stat.st_size != second_stat.st_size:
+        return False, "file size changed during stability probe"
+
+    if first_stat.st_mtime_ns != second_stat.st_mtime_ns:
+        return False, "file mtime changed during stability probe"
+
+    return True, "stable"
+
+
+def find_next_ready_landing_file(landing_dir: Path) -> Path | None:
+    if not landing_dir.exists():
+        print(f"[process] landing dir does not exist: {landing_dir}")
+        return None
+
+    candidates = sorted(
+        [path for path in landing_dir.iterdir() if is_supported_landing_file(path)],
+        key=lambda path: path.stat().st_mtime,
+    )
+
+    if not candidates:
+        print("[process] no files found in landing")
+        return None
+
+    for candidate in candidates:
+        stable, reason = is_file_stable(candidate)
+        if stable:
+            print(f"[process] selected file: {candidate}")
+            return candidate
+
+        print(f"[process] skip not-ready file: {candidate.name}; reason={reason}")
+
+    print("[process] no ready files found in landing")
+    return None
 
 from project_paths import (
     PROJECT_ROOT,
@@ -39,6 +139,9 @@ STATUS_JOBS_SCRIPT = SCRIPT_DIR / "status_jobs.py"
 RETRY_FAILED_JOB_SCRIPT = SCRIPT_DIR / "retry_failed_job.py"
 REPAIR_GOLD_FROM_JSON_SCRIPT = SCRIPT_DIR / "repair_gold_from_json.py"
 CHECK_STORAGE_INTEGRITY_SCRIPT = SCRIPT_DIR / "check_storage_integrity.py"
+REBUILD_JOBS_DB_SCRIPT = SCRIPT_DIR / "rebuild_jobs_db.py"
+JOBS_DB_STATUS_SCRIPT = SCRIPT_DIR / "jobs_db_status.py"
+JOBS_DB_PATH = DATA_DIR / "jobs.db"
 RECOVER_ORPHANED_PROCESSING_SCRIPT = SCRIPT_DIR / "recover_orphaned_processing.py"
 INIT_DIRS_SCRIPT = SCRIPT_DIR / "init_dirs.py"
 
@@ -54,6 +157,8 @@ IMPORTANT_SCRIPTS = [
     SCRIPT_DIR / "recover_orphaned_processing.py",
     SCRIPT_DIR / "init_dirs.py",
     SCRIPT_DIR / "pipeline.py",
+    SCRIPT_DIR / "rebuild_jobs_db.py",
+    SCRIPT_DIR / "jobs_db_status.py",
 ]
 
 
@@ -207,7 +312,7 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         if incompatible:
             print(
-                "ERROR: эти параметры используются только для batch-обработки landing: "
+                "ERROR: эти параметры используются только для обработки landing: "
                 + ", ".join(incompatible)
             )
             return 2
@@ -224,28 +329,41 @@ def cmd_process(args: argparse.Namespace) -> int:
 
         return run_command(command)
 
-    command = [
-        sys.executable,
-        str(PROCESS_LANDING_ONCE_SCRIPT),
-    ]
-
-    if args.dry_run:
-        command.append("--dry-run")
-
-    if args.show_sizes:
-        command.append("--show-sizes")
-
-    if args.limit is not None:
-        command.extend(["--limit", str(args.limit)])
-
-    if args.newest_first:
-        command.append("--newest-first")
+    if args.limit is not None and args.limit != 1:
+        print("ERROR: process без --input теперь обрабатывает максимум один файл за запуск.")
+        print("Используй --limit 1 или не указывай --limit.")
+        return 2
 
     if args.continue_on_error:
-        command.append("--continue-on-error")
+        print("[process] --continue-on-error ignored: one-file mode processes at most one file.")
+
+    input_file = find_next_ready_landing_file(LANDING_DIR)
+
+    if input_file is None:
+        return 0
+
+    if args.show_sizes:
+        try:
+            size_mb = input_file.stat().st_size / 1024 / 1024
+            print(f"[process] selected file size: {size_mb:.2f} MB")
+        except FileNotFoundError:
+            print("[process] selected file disappeared before processing")
+            return 0
+
+    command = [
+        sys.executable,
+        str(PROCESS_ONE_SCRIPT),
+        "--input",
+        str(input_file),
+    ]
 
     if args.keep_processing:
         command.append("--keep-processing")
+
+    if args.dry_run:
+        print("[process] dry-run: selected file would be processed")
+        print(f"[process] dry-run input: {input_file}")
+        return 0
 
     return run_command(command)
 
@@ -376,6 +494,54 @@ def cmd_init(args: argparse.Namespace) -> int:
         sys.executable,
         str(INIT_DIRS_SCRIPT),
     ]
+
+    return run_command(command)
+
+
+def cmd_jobs_rebuild(args: argparse.Namespace) -> int:
+    command = [
+        sys.executable,
+        str(REBUILD_JOBS_DB_SCRIPT),
+    ]
+
+    if args.db_path:
+        command.extend(["--db-path", args.db_path])
+
+    if args.dry_run:
+        command.append("--dry-run")
+
+    if args.json_output:
+        command.append("--json")
+
+    return run_command(command)
+
+
+def cmd_jobs_status(args: argparse.Namespace) -> int:
+    command = [
+        sys.executable,
+        str(JOBS_DB_STATUS_SCRIPT),
+    ]
+
+    if args.db_path:
+        command.extend(["--db-path", args.db_path])
+
+    if args.limit is not None:
+        command.extend(["--limit", str(args.limit)])
+
+    if args.status:
+        command.extend(["--status", args.status])
+
+    if args.job_id:
+        command.extend(["--job-id", args.job_id])
+
+    if args.search:
+        command.extend(["--search", args.search])
+
+    if args.details:
+        command.append("--details")
+
+    if args.json_output:
+        command.append("--json")
 
     return run_command(command)
 
@@ -650,6 +816,74 @@ def check_orphaned_processing_summary(
     )
 
 
+def check_jobs_db(results: list[CheckResult]) -> None:
+    if not JOBS_DB_PATH.exists():
+        results.append(
+            CheckResult(
+                "warn",
+                "jobs_db:missing",
+                "jobs.db не найден.",
+                "Это не ошибка для первого запуска. Создать индекс: python scripts\\pipeline.py jobs rebuild",
+            )
+        )
+        return
+
+    try:
+        db_mtime = datetime.fromtimestamp(JOBS_DB_PATH.stat().st_mtime).isoformat(timespec="seconds")
+
+        with sqlite3.connect(JOBS_DB_PATH) as connection:
+            table_exists = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'jobs'
+                """
+            ).fetchone()
+
+            if not table_exists:
+                results.append(
+                    CheckResult(
+                        "error",
+                        "jobs_db:missing_jobs_table",
+                        "jobs.db найден, но таблица jobs отсутствует.",
+                        f"Пересобери индекс: python scripts\\pipeline.py jobs rebuild; db={JOBS_DB_PATH}",
+                    )
+                )
+                return
+
+            jobs_count = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            status_rows = connection.execute(
+                """
+                SELECT status, COUNT(*)
+                FROM jobs
+                GROUP BY status
+                ORDER BY status
+                """
+            ).fetchall()
+
+        statuses = ", ".join(f"{status or 'UNKNOWN'}={count}" for status, count in status_rows)
+
+        results.append(
+            CheckResult(
+                "ok",
+                "jobs_db",
+                f"jobs.db доступен: jobs={jobs_count}.",
+                f"updated_at={db_mtime}; statuses: {statuses or 'none'}",
+            )
+        )
+
+    except Exception as exc:
+        results.append(
+            CheckResult(
+                "ERROR",
+                "jobs_db:open_failed",
+                "Не удалось прочитать jobs.db.",
+                f"{exc}; db={JOBS_DB_PATH}",
+            )
+        )
+
+
 def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
     load_dotenv_if_exists()
 
@@ -766,6 +1000,8 @@ def collect_doctor_results(verbose: bool = False) -> list[CheckResult]:
         verbose=verbose,
     )
 
+    check_jobs_db(results)
+
     check_orphaned_processing_summary(
         results=results,
         verbose=verbose,
@@ -872,10 +1108,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     process_parser = subparsers.add_parser(
         "process",
-        help="Обработать один файл или все готовые файлы из landing.",
+        help="Обработать один входной файл или один готовый файл из landing.",
         description=(
-            "Обработка входных файлов. Если указан --input, обрабатывается один файл. "
-            "Если --input не указан, запускается batch-обработка всех готовых файлов из data/landing."
+            "Обработка входных файлов. Если указан --input, обрабатывается конкретный файл. "
+            "Если --input не указан, выбирается один готовый файл из data/landing."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -902,7 +1138,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit",
         type=int,
         default=None,
-        help="Обработать максимум N файлов из landing.",
+        help="Совместимость со старым batch-режимом. Сейчас допустимо только --limit 1.",
     )
     process_parser.add_argument(
         "--newest-first",
@@ -912,7 +1148,7 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser.add_argument(
         "--continue-on-error",
         action="store_true",
-        help="Не останавливаться на первой ошибке и продолжать следующие файлы.",
+        help="Совместимость со старым batch-режимом. В one-file режиме игнорируется.",
     )
     process_parser.add_argument(
         "--keep-processing",
@@ -1058,6 +1294,45 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     init_parser.set_defaults(func=cmd_init)
+
+    jobs_parser = subparsers.add_parser(
+        "jobs",
+        help="Работа с восстановимым jobs.db индексом.",
+        description=(
+            "Команды для пересборки и просмотра data/jobs.db. "
+            "jobs.db является восстановимым индексом поверх файловой структуры, "
+            "а не source of truth."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    jobs_subparsers = jobs_parser.add_subparsers(
+        dest="jobs_command",
+        required=True,
+    )
+
+    jobs_rebuild_parser = jobs_subparsers.add_parser(
+        "rebuild",
+        help="Пересобрать data/jobs.db из файловой структуры.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    jobs_rebuild_parser.add_argument("--db-path", default=None)
+    jobs_rebuild_parser.add_argument("--dry-run", action="store_true")
+    jobs_rebuild_parser.add_argument("--json", action="store_true", dest="json_output")
+    jobs_rebuild_parser.set_defaults(func=cmd_jobs_rebuild)
+
+    jobs_status_parser = jobs_subparsers.add_parser(
+        "status",
+        help="Показать jobs из data/jobs.db.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    jobs_status_parser.add_argument("--db-path", default=None)
+    jobs_status_parser.add_argument("--limit", type=int, default=20)
+    jobs_status_parser.add_argument("--status")
+    jobs_status_parser.add_argument("--job-id")
+    jobs_status_parser.add_argument("--search")
+    jobs_status_parser.add_argument("--details", action="store_true")
+    jobs_status_parser.add_argument("--json", action="store_true", dest="json_output")
+    jobs_status_parser.set_defaults(func=cmd_jobs_status)
 
     return parser
 
