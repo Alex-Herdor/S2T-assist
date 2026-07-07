@@ -1,0 +1,62 @@
+@echo off
+setlocal
+
+set PROJECT_DIR=C:\path\to\whisperx_ru
+set CONDA_BAT=C:\path\to\miniconda3\condabin\conda.bat
+set CONDA_ENV=whisperx-ru
+
+cd /d "%PROJECT_DIR%"
+if errorlevel 1 exit /b 1
+
+if not exist logs mkdir logs
+if not exist data\.locks mkdir data\.locks
+
+set LOG_FILE=logs\pipeline_worker.log
+set LOCK_FILE=data\.locks\pipeline_worker.lock
+
+echo [%date% %time%] Worker started >> %LOG_FILE%
+
+if exist "%LOCK_FILE%" (
+    echo [%date% %time%] Lock exists, another worker may be running. Exit. >> %LOG_FILE%
+    exit /b 0
+)
+
+echo %date% %time% > "%LOCK_FILE%"
+
+if not exist "%CONDA_BAT%" (
+    echo [%date% %time%] Conda bat not found: %CONDA_BAT% >> %LOG_FILE%
+    del "%LOCK_FILE%"
+    exit /b 1
+)
+
+call "%CONDA_BAT%" activate %CONDA_ENV%
+if errorlevel 1 (
+    echo [%date% %time%] Failed to activate conda env. >> %LOG_FILE%
+    del "%LOCK_FILE%"
+    exit /b 1
+)
+
+echo [%date% %time%] Conda env activated. >> %LOG_FILE%
+
+python --version >> %LOG_FILE% 2>>&1
+where python >> %LOG_FILE% 2>>&1
+
+python scripts\pipeline.py process >> %LOG_FILE% 2>>&1
+set PROCESS_EXIT_CODE=%ERRORLEVEL%
+
+echo [%date% %time%] Process finished with code %PROCESS_EXIT_CODE% >> %LOG_FILE%
+
+echo [%date% %time%] Rebuilding jobs.db... >> %LOG_FILE%
+python scripts\pipeline.py jobs rebuild >> %LOG_FILE% 2>>&1
+set JOBS_REBUILD_EXIT_CODE=%ERRORLEVEL%
+
+echo [%date% %time%] jobs.db rebuild finished with code %JOBS_REBUILD_EXIT_CODE% >> %LOG_FILE%
+
+set EXIT_CODE=%PROCESS_EXIT_CODE%
+if "%PROCESS_EXIT_CODE%"=="0" if not "%JOBS_REBUILD_EXIT_CODE%"=="0" set EXIT_CODE=%JOBS_REBUILD_EXIT_CODE%
+
+echo [%date% %time%] Worker finished with code %EXIT_CODE% >> %LOG_FILE%
+
+del "%LOCK_FILE%"
+
+exit /b %EXIT_CODE%

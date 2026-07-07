@@ -35,6 +35,8 @@ data/failed/*
 data/archive/*
 !data/archive/.gitkeep
 
+scripts/run_pipeline_worker.bat
+
 # =========================
 # Hugging Face / model cache
 # =========================
